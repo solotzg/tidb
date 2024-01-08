@@ -124,34 +124,14 @@ func zeroMyDecimalWithFrac(frac int8) MyDecimal {
 }
 
 // add adds a and b and carry, returns the sum and new carry.
-func add(a, b, carry int32) (sum int32, newCarry int32) {
-	sum = a + b + carry
+func add(a, b, carry int32) (int32, int32) {
+	sum := uint32(a) + uint32(b) + uint32(carry)
+	newCarry := uint32(0)
 	if sum >= wordBase {
 		newCarry = 1
 		sum -= wordBase
-	} else {
-		newCarry = 0
 	}
-	return sum, newCarry
-}
-
-// add2 adds a and b and carry, returns the sum and new carry.
-// It is only used in DecimalMul.
-// nolint: revive
-func add2(a, b, carry int32) (int32, int32) {
-	sum := int64(a) + int64(b) + int64(carry)
-	if sum >= wordBase {
-		carry = 1
-		sum -= wordBase
-	} else {
-		carry = 0
-	}
-
-	if sum >= wordBase {
-		sum -= wordBase
-		carry++
-	}
-	return int32(sum), carry
+	return int32(sum), int32(newCarry)
 }
 
 // sub subtracts b and carry from a, returns the diff and new carry.
@@ -164,23 +144,6 @@ func sub(a, b, carry int32) (diff int32, newCarry int32) {
 		newCarry = 0
 	}
 	return diff, newCarry
-}
-
-// sub2 subtracts b and carry from a, returns the diff and new carry.
-// the new carry may be 2.
-func sub2(a, b, carry int32) (diff int32, newCarray int32) {
-	diff = a - b - carry
-	if diff < 0 {
-		newCarray = 1
-		diff += wordBase
-	} else {
-		newCarray = 0
-	}
-	if diff < 0 {
-		diff += wordBase
-		newCarray++
-	}
-	return diff, newCarray
 }
 
 // fixWordCntError limits word count in wordBufLen, and returns overflow or truncate error.
@@ -2028,18 +1991,12 @@ func DecimalMul(from1, from2, to *MyDecimal) error {
 			p := int64(from1.wordBuf[idx1]) * int64(from2.wordBuf[idx2])
 			hi = int32(p / wordBase)
 			lo = int32(p - int64(hi)*wordBase)
-			to.wordBuf[idxTo], carry = add2(to.wordBuf[idxTo], lo, carry)
+			to.wordBuf[idxTo], carry = add(to.wordBuf[idxTo], lo, carry)
 			carry += hi
 			idx2--
 			idxTo--
 		}
-		if carry > 0 {
-			if idxTo < 0 {
-				return ErrOverflow
-			}
-			to.wordBuf[idxTo], carry = add2(to.wordBuf[idxTo], 0, carry)
-		}
-		for idxTo--; carry > 0; idxTo-- {
+		for ; carry > 0; idxTo-- {
 			if idxTo < 0 {
 				return ErrOverflow
 			}
@@ -2282,7 +2239,7 @@ func doDivMod(from1, from2, to, mod *MyDecimal, fracIncr int) error {
 				x = guess * int64(from2.wordBuf[idx2])
 				hi = int32(x / wordBase)
 				lo = int32(x - int64(hi)*wordBase)
-				tmp1[idx1], carry = sub2(tmp1[idx1], lo, carry)
+				tmp1[idx1], carry = sub(tmp1[idx1], lo, carry)
 				carry += hi
 			}
 			if dcarry < carry {
