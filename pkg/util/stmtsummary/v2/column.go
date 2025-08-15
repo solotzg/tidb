@@ -103,6 +103,8 @@ const (
 	SumBackoffTimesStr                = "SUM_BACKOFF_TIMES"
 	BackoffTypesStr                   = "BACKOFF_TYPES"
 	AvgMemStr                         = "AVG_MEM"
+	AvgMemArbitrationStr              = "AVG_MEM_ARBITRATION"
+	MaxMemArbitrationStr              = "MAX_MEM_ARBITRATION"
 	MaxMemStr                         = "MAX_MEM"
 	AvgDiskStr                        = "AVG_DISK"
 	MaxDiskStr                        = "MAX_DISK"
@@ -377,6 +379,12 @@ var columnFactoryMap = map[string]columnFactory{
 	},
 	MaxMemStr: func(_ columnInfo, record *StmtRecord) any {
 		return record.MaxMem
+	},
+	AvgMemArbitrationStr: func(_ columnInfo, record *StmtRecord) any {
+		return avgSumFloat(record.SumMemArbitration, record.ExecCount)
+	},
+	MaxMemArbitrationStr: func(_ columnInfo, record *StmtRecord) any {
+		return record.MaxMemArbitration
 	},
 	AvgDiskStr: func(_ columnInfo, record *StmtRecord) any {
 		return avgInt(record.SumDisk, record.ExecCount)

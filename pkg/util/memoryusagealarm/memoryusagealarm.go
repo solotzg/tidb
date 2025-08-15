@@ -132,6 +132,10 @@ func (record *memoryUsageAlarm) initMemoryUsageAlarmRecord() {
 // If Performance.ServerMemoryQuota is set, use `ServerMemoryQuota * MemoryUsageAlarmRatio` to check oom risk.
 // If Performance.ServerMemoryQuota is not set, use `system total memory size * MemoryUsageAlarmRatio` to check oom risk.
 func (record *memoryUsageAlarm) alarm4ExcessiveMemUsage(sm util.SessionManager) {
+	if memory.UsingGlobalMemArbitration() {
+		return
+	}
+
 	if !record.initialized {
 		record.initMemoryUsageAlarmRecord()
 		if record.err != nil {

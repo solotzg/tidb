@@ -289,6 +289,8 @@ const (
 	BackoffTypesStr                   = "BACKOFF_TYPES"
 	AvgMemStr                         = "AVG_MEM"
 	MaxMemStr                         = "MAX_MEM"
+	AvgMemArbitrationStr              = "AVG_MEM_ARBITRATION"
+	MaxMemArbitrationStr              = "MAX_MEM_ARBITRATION"
 	AvgDiskStr                        = "AVG_DISK"
 	MaxDiskStr                        = "MAX_DISK"
 	AvgKvTimeStr                      = "AVG_KV_TIME"
@@ -557,6 +559,12 @@ var columnValueFactoryMap = map[string]columnValueFactory{
 	},
 	MaxMemStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
 		return ssElement.maxMem
+	},
+	AvgMemArbitrationStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+		return avgSumFloat(ssElement.sumMemArbitration, ssElement.execCount)
+	},
+	MaxMemArbitrationStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
+		return ssElement.maxMemArbitration
 	},
 	AvgDiskStr: func(_ *stmtSummaryReader, ssElement *stmtSummaryByDigestElement, _ *stmtSummaryByDigest) any {
 		return avgInt(ssElement.sumDisk, ssElement.execCount)

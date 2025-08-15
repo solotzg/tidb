@@ -228,6 +228,8 @@ type stmtSummaryByDigestElement struct {
 
 	planCacheUnqualifiedCount int64
 	lastPlanCacheUnqualified  string // the reason why this query is unqualified for the plan cache
+	sumMemArbitration         float64
+	maxMemArbitration         float64
 }
 
 // StmtExecInfo records execution information of each statement.
@@ -248,6 +250,7 @@ type StmtExecInfo struct {
 	CopTasks       *execdetails.CopTasksSummary
 	ExecDetail     execdetails.ExecDetails
 	MemMax         int64
+	MemArbitration float64
 	DiskMax        int64
 	StartTime      time.Time
 	IsInternal     bool
@@ -895,6 +898,12 @@ func (ssElement *stmtSummaryByDigestElement) add(sei *StmtExecInfo, intervalSeco
 	if sei.MemMax > ssElement.maxMem {
 		ssElement.maxMem = sei.MemMax
 	}
+
+	ssElement.sumMemArbitration += sei.MemArbitration
+	if sei.MemArbitration > ssElement.maxMemArbitration {
+		ssElement.maxMemArbitration = sei.MemArbitration
+	}
+
 	ssElement.sumDisk += sei.DiskMax
 	if sei.DiskMax > ssElement.maxDisk {
 		ssElement.maxDisk = sei.DiskMax

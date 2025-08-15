@@ -1720,6 +1720,12 @@ type SessionVars struct {
 
 	// InternalSQLScanUserTable indicates whether to use user table for internal SQL. it will be used by TTL scan
 	InternalSQLScanUserTable bool
+
+	// MemArbitrator represents the properties to be controlled by the memory arbitrator.
+	MemArbitrator struct {
+		WaitAverse    MemArbitratorWaitAverseMode
+		QueryReserved int64
+	}
 }
 
 // GetSessionVars implements the `SessionVarsProvider` interface.
@@ -3325,6 +3331,8 @@ const (
 	SlowLogCopBackoffPrefix = "Cop_backoff_"
 	// SlowLogMemMax is the max number bytes of memory used in this statement.
 	SlowLogMemMax = "Mem_max"
+	// SlowLogMemArbitration is the total wait time(ns) of mem arbitration
+	SlowLogMemArbitration = "Mem_arbitration"
 	// SlowLogDiskMax is the max number bytes of disk used in this statement.
 	SlowLogDiskMax = "Disk_max"
 	// SlowLogPrepared is used to indicate whether this sql execute in prepare.
@@ -3450,6 +3458,7 @@ type SlowQueryLogItems struct {
 	WRU               float64
 	WaitRUDuration    time.Duration
 	CPUUsages         ppcpuusage.CPUUsages
+	MemArbitration    float64
 }
 
 // SlowLogFormat uses for formatting slow log.
@@ -3608,6 +3617,9 @@ func (s *SessionVars) SlowLogFormat(logItems *SlowQueryLogItems) string {
 	}
 	if logItems.MemMax > 0 {
 		writeSlowLogItem(&buf, SlowLogMemMax, strconv.FormatInt(logItems.MemMax, 10))
+	}
+	if logItems.MemArbitration > 0 {
+		writeSlowLogItem(&buf, SlowLogMemArbitration, strconv.FormatFloat(logItems.MemArbitration, 'f', -1, 64))
 	}
 	if logItems.DiskMax > 0 {
 		writeSlowLogItem(&buf, SlowLogDiskMax, strconv.FormatInt(logItems.DiskMax, 10))
@@ -4084,4 +4096,22 @@ const (
 	ScatterTable string = "table"
 	// ScatterGlobal means scatter region at global level
 	ScatterGlobal string = "global"
+)
+
+// MemArbitratorWaitAverseMode is the definition for global memory arbitrator to handle wait-averse mode.
+type MemArbitratorWaitAverseMode int
+
+// NoLimit indicates that the memory arbitrator will not control current session
+// Enable indicates that the session will be controlled by the wait-averse mode
+const (
+	MemArbitratorWaitAverseDisable MemArbitratorWaitAverseMode = iota
+	MemArbitratorWaitAverseEnable
+	MemArbitratorNolimit
+)
+
+// Error definitions for memory arbitrator session variables.
+var (
+	ErrTiDBMemArbitratorSoftLimit     = errors.New(TiDBMemArbitratorSoftLimit + ": 0 (default); (0, 1.0] float-rate * server-limit; (1, server-limit] integer bytes; auto;")
+	ErrTiDBMemArbitratorWaitAverse    = errors.New(TiDBMemArbitratorWaitAverse + ": 0 (disable); 1 (enable); nolimit;")
+	ErrTiDBMemArbitratorQueryReserved = errors.New(TiDBMemArbitratorQueryReserved + ": 0 (default); (1, server-limit] integer bytes;")
 )

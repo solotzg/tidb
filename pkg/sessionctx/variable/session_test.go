@@ -244,6 +244,7 @@ func TestSlowLogFormat(t *testing.T) {
 # Cop_backoff_rpcPD_total_times: 200 Cop_backoff_rpcPD_total_time: 0.2 Cop_backoff_rpcPD_max_time: 0.2 Cop_backoff_rpcPD_max_addr: 127.0.0.1 Cop_backoff_rpcPD_avg_time: 0.2 Cop_backoff_rpcPD_p90_time: 0.2
 # Cop_backoff_rpcTiKV_total_times: 200 Cop_backoff_rpcTiKV_total_time: 0.2 Cop_backoff_rpcTiKV_max_time: 0.2 Cop_backoff_rpcTiKV_max_addr: 127.0.0.1 Cop_backoff_rpcTiKV_avg_time: 0.2 Cop_backoff_rpcTiKV_p90_time: 0.2
 # Mem_max: 2333
+# Mem_arbitration: 0.000054321
 # Disk_max: 6666
 # Prepared: true
 # Plan_from_cache: true
@@ -304,6 +305,7 @@ func TestSlowLogFormat(t *testing.T) {
 		RRU:               50.0,
 		WRU:               100.56,
 		WaitRUDuration:    134 * time.Millisecond,
+		MemArbitration:    time.Duration(54321).Seconds(),
 	}
 	logItems.UsedStats.RecordUsedInfo(1, usedStats1)
 	logItems.UsedStats.RecordUsedInfo(2, usedStats2)
