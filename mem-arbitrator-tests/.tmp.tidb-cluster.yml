@@ -1,0 +1,28 @@
+version: "3.3"
+name: "tzg"
+services:
+  tidb0:
+    image: hub.pingcap.net/qa/tidb:v7.6.0
+    volumes:
+      - ${test_deploy_path}/log/tidb0:/log
+      - ${test_deploy_path}/tmp/tidb0:/tmp
+      - ${test_tidb_bin_path}:${test_tidb_bin_tar_path}
+      - ${test_tidb_cfg_path}:${test_tidb_cfg_path}
+    command:
+      - --store=tikv
+      - --path=${test_host_name}:2355
+      - --log-file=/log/tidb.log
+      - --status=${test_tidb_status_port}
+      - -P=${test_tidb_port}
+      - --initialize-insecure
+      - --advertise-address=${test_host_name}
+      - --config=${test_tidb_cfg_path}
+    ports:
+      - "${test_tidb_port}:${test_tidb_port}"
+      - "${test_tidb_status_port}:${test_tidb_status_port}"
+    deploy:
+      resources:
+        limits:
+          cpus: "${max_cpus}"
+          memory: ${max_memory}
+

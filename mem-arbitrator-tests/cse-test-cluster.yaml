@@ -1,0 +1,56 @@
+global:
+  user: "root"
+  ssh_port: 22
+  deploy_dir: "/DATA/disk2/tongzhigao/tidb/bin/minio_dep/tidb-deploy"
+  data_dir: "/DATA/disk2/tongzhigao/tidb/bin/minio_dep/tidb-data"
+
+server_configs: 
+  tidb:
+    keyspace-name: "SYSTEM"
+
+  pd:
+    replication.max-replicas: 1
+    keyspace.pre-alloc: ["SYSTEM","keyspace1"]
+    keyspace.enable-global-safe-point-v2: true
+    keyspace.disable-raw-kv-region-split: true
+
+  tikv:
+    storage.api-version: 2
+    storage.enable-ttl: true
+    storage.reserve-space: 0
+
+    dfs.prefix: "tikv"
+    dfs.s3-endpoint: "http://10.2.12.124:9000"
+    dfs.s3-key-id: "minioadmin"
+    dfs.s3-secret-key: "minioadmin"
+    dfs.s3-bucket: "cse-test"
+    dfs.s3-region: "local"
+
+    rfengine.wal-sync-dir: "/DATA/disk2/tongzhigao/tidb/bin/minio_dep/tidb-data/tikv-20061/raft-wal"
+    rfengine.lightweight-backup: true
+    rfengine.target-file-size: "512MB"
+    rfengine.wal-chunk-target-file-size: "128MB"
+
+pd_servers:
+  - host: 10.2.12.124
+    client_port: 2355
+    peer_port: 2354
+
+tidb_servers:
+  - host: 10.2.12.124
+    port: 4066
+    status_port: 10066
+
+tikv_servers:
+  - host: 10.2.12.124
+    port: 20061
+    status_port: 20062
+
+monitoring_servers:
+  - host: 10.2.12.124
+    port: 9076
+    ng_port: 12076
+
+grafana_servers:
+  - host: 10.2.12.124
+    port: 3075
