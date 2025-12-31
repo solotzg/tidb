@@ -245,7 +245,7 @@ class Runner:
             self.execute("set global tidb_gogc_tuner_threshold=default")
             self.execute("set global tidb_enable_gogc_tuner=default")
             self.execute("set global tidb_server_memory_limit=default")
-            self.execute("set global tidb_server_memory_limit_sess_min_size=1")
+            self.execute("set global tidb_server_memory_limit_sess_min_size=default")
 
     def get_tidb_mem_arbitrator_mode(self, ommit_exception=True):
         try:
