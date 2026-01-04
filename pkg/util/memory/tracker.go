@@ -79,7 +79,7 @@ type Tracker struct {
 	parent               atomic.Pointer[Tracker]
 	MemArbitrator        *memArbitrator
 	Killer               *sqlkiller.SQLKiller
-	bytesLimit           atomic.Pointer[bytesLimits]
+	bytesLimit           bytesLimits
 	actionMuForHardLimit actionMu
 	actionMuForSoftLimit actionMu
 	mu                   struct {
@@ -149,14 +149,14 @@ func InitTracker(t *Tracker, label int, bytesLimit int64, action ActionOnExceed)
 
 	t.label = label
 	if bytesLimit <= 0 {
-		t.bytesLimit.Store(&unlimitedBytesLimit)
+		t.bytesLimit = unlimitedBytesLimit
 	} else if bytesLimit == DefMemQuotaQuery {
-		t.bytesLimit.Store(&defaultQueryQuota)
+		t.bytesLimit = defaultQueryQuota
 	} else {
-		t.bytesLimit.Store(&bytesLimits{
+		t.bytesLimit = bytesLimits{
 			bytesHardLimit: bytesLimit,
 			bytesSoftLimit: int64(float64(bytesLimit) * softScale),
-		})
+		}
 	}
 	t.maxConsumed.Store(0)
 	t.isGlobal = false
@@ -172,10 +172,10 @@ func NewTracker(label int, bytesLimit int64) *Tracker {
 	t := &Tracker{
 		label: label,
 	}
-	t.bytesLimit.Store(&bytesLimits{
+	t.bytesLimit = bytesLimits{
 		bytesHardLimit: bytesLimit,
 		bytesSoftLimit: int64(float64(bytesLimit) * softScale),
-	})
+	}
 	t.actionMuForHardLimit.actionOnExceed = &LogOnExceed{}
 	t.isGlobal = false
 	return t
@@ -186,10 +186,10 @@ func NewGlobalTracker(label int, bytesLimit int64) *Tracker {
 	t := &Tracker{
 		label: label,
 	}
-	t.bytesLimit.Store(&bytesLimits{
+	t.bytesLimit = bytesLimits{
 		bytesHardLimit: bytesLimit,
 		bytesSoftLimit: int64(float64(bytesLimit) * softScale),
-	})
+	}
 	t.actionMuForHardLimit.actionOnExceed = &LogOnExceed{}
 	t.isGlobal = true
 	return t
@@ -198,33 +198,33 @@ func NewGlobalTracker(label int, bytesLimit int64) *Tracker {
 // CheckBytesLimit check whether the bytes limit of the tracker is equal to a value.
 // Only used in test.
 func (t *Tracker) CheckBytesLimit(val int64) bool {
-	return t.bytesLimit.Load().bytesHardLimit == val
+	return t.bytesLimit.bytesHardLimit == val
 }
 
 // SetBytesLimit sets the bytes limit for this tracker.
 // "bytesHardLimit <= 0" means no limit.
 func (t *Tracker) SetBytesLimit(bytesLimit int64) {
 	if bytesLimit <= 0 {
-		t.bytesLimit.Store(&unlimitedBytesLimit)
+		t.bytesLimit = unlimitedBytesLimit
 	} else if bytesLimit == DefMemQuotaQuery {
-		t.bytesLimit.Store(&defaultQueryQuota)
+		t.bytesLimit = defaultQueryQuota
 	} else {
-		t.bytesLimit.Store(&bytesLimits{
+		t.bytesLimit = bytesLimits{
 			bytesHardLimit: bytesLimit,
 			bytesSoftLimit: int64(float64(bytesLimit) * softScale),
-		})
+		}
 	}
 }
 
 // GetBytesLimit gets the bytes limit for this tracker.
 // "bytesHardLimit <= 0" means no limit.
 func (t *Tracker) GetBytesLimit() int64 {
-	return t.bytesLimit.Load().bytesHardLimit
+	return t.bytesLimit.bytesHardLimit
 }
 
 // CheckExceed checks whether the consumed bytes is exceed for this tracker.
 func (t *Tracker) CheckExceed() bool {
-	bytesHardLimit := t.bytesLimit.Load().bytesHardLimit
+	bytesHardLimit := t.bytesLimit.bytesHardLimit
 	return atomic.LoadInt64(&t.bytesConsumed) >= bytesHardLimit && bytesHardLimit > 0
 }
 
@@ -487,11 +487,10 @@ func (t *Tracker) Consume(bs int64) {
 		}
 		bytesConsumed := atomic.AddInt64(&tracker.bytesConsumed, bs)
 		bytesReleased := atomic.LoadInt64(&tracker.bytesReleased)
-		limits := tracker.bytesLimit.Load()
-		if bytesConsumed+bytesReleased >= limits.bytesHardLimit && limits.bytesHardLimit > 0 {
+		if bytesConsumed+bytesReleased >= tracker.bytesLimit.bytesHardLimit && tracker.bytesLimit.bytesHardLimit > 0 {
 			rootExceed = tracker
 		}
-		if bytesConsumed+bytesReleased >= limits.bytesSoftLimit && limits.bytesSoftLimit > 0 {
+		if bytesConsumed+bytesReleased >= tracker.bytesLimit.bytesSoftLimit && tracker.bytesLimit.bytesSoftLimit > 0 {
 			rootExceedForSoftLimit = tracker
 		}
 
