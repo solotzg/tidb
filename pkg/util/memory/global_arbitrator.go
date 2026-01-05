@@ -140,14 +140,14 @@ func reportGlobalMemArbitratorMetrics() {
 			metrics.SetGlobalMemArbitratorGauge(metrics.GlobalMemArbitratorRootPool, label, value)
 		}
 		setRootPool("root-pool", m.RootPoolNum())
-		setRootPool("internal-session", globalArbitrator.metrics.pools.internalSession.Load())
+		setRootPool("session-internal", globalArbitrator.metrics.pools.internalSession.Load())
 		setRootPool("under-kill", m.underKill.approxSize())
 		setRootPool("under-cancel", m.underCancel.approxSize())
 		setRootPool("digest-cache", m.digestProfileCache.num.Load())
-		setRootPool("big-sql", globalArbitrator.metrics.pools.big.Load())
-		setRootPool("small-sql", globalArbitrator.metrics.pools.small.Load())
-		setRootPool("internal-sql", globalArbitrator.metrics.pools.internal.Load())
-		setRootPool("small-into-big", globalArbitrator.metrics.pools.intoBig.Load())
+		setRootPool("sql-big", globalArbitrator.metrics.pools.big.Load())
+		setRootPool("sql-small", globalArbitrator.metrics.pools.small.Load())
+		setRootPool("sql-internal", globalArbitrator.metrics.pools.internal.Load())
+		setRootPool("sql-into-big", globalArbitrator.metrics.pools.intoBig.Load())
 	}
 	{ // counter
 		newExecMetrics := m.ExecMetrics()
