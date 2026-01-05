@@ -1535,6 +1535,12 @@ func (m *MemArbitrator) limit() int64 {
 	return m.mu.limit
 }
 
+//go:norace
+func (m *MemArbitrator) available() int64 {
+	return min(m.limit()-m.reservedBuffer()-m.heapController.heapAlloc.Load(),
+		m.limit()-m.reservedBuffer()-m.OutOfControl()-m.allocated())
+}
+
 // Limit returns the mem quota limit of the mem-arbitrator
 func (m *MemArbitrator) Limit() uint64 {
 	if m == nil {
@@ -1693,7 +1699,7 @@ func (m *MemArbitrator) arbitrate(target *rootPoolEntry) (bool, int64) {
 	}
 
 	for {
-		ok, reclaimed := m.allocateFromArbitrator(remainBytes, m.reservedBuffer()+m.avoidance.size.Load())
+		ok, reclaimed := m.allocateFromArbitrator(remainBytes, m.reservedBuffer()+m.OutOfControl())
 		reclaimedBytes += reclaimed
 		remainBytes -= reclaimed
 		if ok {
@@ -2574,7 +2580,7 @@ func (m *MemArbitrator) recordDebugProfile() (f DebugFields) {
 		zap.Int64("awaitfree-pool-used", m.approxAwaitFreePoolUsed().quota),
 		zap.Int64("awaitfree-pool-heapinuse", m.approxAwaitFreePoolUsed().trackedHeap),
 		zap.Int64("tracked-heapinuse", m.avoidance.heapTracked.Load()),
-		zap.Int64("out-of-control", m.avoidance.size.Load()),
+		zap.Int64("out-of-control", m.OutOfControl()),
 		zap.Int64("buffer", m.buffer.size.Load()),
 		zap.Int64("task-num", m.TaskNum()),
 		zap.Int64("task-priority-low", taskNumByMode[ArbitrationPriorityLow]),
@@ -3017,7 +3023,7 @@ func (m *MemArbitrator) initAwaitFreePool(allocAlignSize, shardNum int64) {
 
 	p.SetOutOfCapacityAction(func(s OutOfCapacityActionArgs) error {
 		if m.heapController.heapAlloc.Load() > m.oomRisk()-s.Request ||
-			m.allocated() > m.limit()-m.avoidance.size.Load()-s.Request {
+			m.allocated() > m.limit()-m.OutOfControl()-s.Request {
 			m.updateBlockedAt()
 			m.execMetrics.AwaitFree.Fail++
 			return errArbitrateFailError
