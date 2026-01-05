@@ -1537,8 +1537,15 @@ func (m *MemArbitrator) limit() int64 {
 
 //go:norace
 func (m *MemArbitrator) available() int64 {
-	return min(m.limit()-m.reservedBuffer()-m.heapController.heapAlloc.Load(),
-		m.limit()-m.reservedBuffer()-m.OutOfControl()-m.allocated())
+	return min(m.heapAvailable(), m.quotaAvailable())
+}
+
+func (m *MemArbitrator) heapAvailable() int64 {
+	return m.limit() - m.reservedBuffer() - m.heapController.heapAlloc.Load()
+}
+
+func (m *MemArbitrator) quotaAvailable() int64 {
+	return m.limit() - m.reservedBuffer() - m.OutOfControl() - m.allocated()
 }
 
 // Limit returns the mem quota limit of the mem-arbitrator
@@ -1549,19 +1556,21 @@ func (m *MemArbitrator) Limit() uint64 {
 	return uint64(m.limit())
 }
 
-func (m *MemArbitrator) allocateFromArbitrator(remainBytes int64, leastLeft int64) (bool, int64) {
+func (m *MemArbitrator) allocateFromArbitrator(remainBytes int64) (bool, int64) {
 	reclaimedBytes := int64(0)
 	ok := false
 	{
 		m.mu.Lock()
 
-		if m.allocated() <= m.limit()-leastLeft-remainBytes {
+		available := m.quotaAvailable()
+
+		if remainBytes <= available {
 			m.doAlloc(remainBytes)
 			reclaimedBytes += remainBytes
 			ok = true
-		} else if rest := m.limit() - leastLeft - m.allocated(); rest > 0 {
-			m.doAlloc(rest)
-			reclaimedBytes += rest
+		} else if available > 0 {
+			m.doAlloc(available)
+			reclaimedBytes += available
 		}
 
 		m.mu.Unlock()
@@ -1676,7 +1685,7 @@ func (m *MemArbitrator) arbitrate(target *rootPoolEntry) (bool, int64) {
 	remainBytes := target.request.quota
 
 	onlyPrivilegedBudget := false
-	for m.heapController.heapAlloc.Load() > m.limit()-m.reservedBuffer()-remainBytes {
+	for remainBytes > m.heapAvailable() {
 		if !m.tryRuntimeGC() {
 			onlyPrivilegedBudget = true // only could alloc from the privileged budget
 			break
@@ -1699,7 +1708,7 @@ func (m *MemArbitrator) arbitrate(target *rootPoolEntry) (bool, int64) {
 	}
 
 	for {
-		ok, reclaimed := m.allocateFromArbitrator(remainBytes, m.reservedBuffer()+m.OutOfControl())
+		ok, reclaimed := m.allocateFromArbitrator(remainBytes)
 		reclaimedBytes += reclaimed
 		remainBytes -= reclaimed
 		if ok {
