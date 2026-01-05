@@ -108,8 +108,9 @@ func reportGlobalMemArbitratorMetrics() {
 			metrics.SetGlobalMemArbitratorGauge(metrics.GlobalMemArbitratorQuota, label, value)
 		}
 		setQuota("allocated", m.allocated())
-		setQuota("out-of-control", m.avoidance.size.Load())
+		setQuota("out-of-control", m.OutOfControl())
 		setQuota("buffer", m.reservedBuffer())
+		setQuota("available", m.available())
 		setQuota("tracked-heap", m.avoidance.heapTracked.Load())
 		setQuota("awaitfree-pool-cap", m.awaitFreePoolCap())
 		setQuota("awaitfree-pool-used", m.approxAwaitFreePoolUsed().quota)
