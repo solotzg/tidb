@@ -91,7 +91,7 @@ class Runner:
             mode, database, warehouses, threads, dur)
         self.label.append(info, )
         self.label.append(self.docker_env)
-        cmd_run = "tiup bench tpcc --warehouses {warehouses} run --host {host} --port {port}  --db {db} --threads {threads} --time {dur}".format(
+        cmd_run = "tiup bench tpcc --warehouses {warehouses} run --host {host} --port {port}  --db {db} --threads {threads} --time {dur} --ignore-error  ".format(
             warehouses=warehouses, host=self.args.host, port=self.args.tidb_port, db=database, threads=threads, dur=dur)
         logger.info("Running TPCC with command: {}".format(cmd_run))
         now = time.time()
@@ -168,7 +168,7 @@ class Runner:
 
     def analyze_table_all(self):
         self.set_tidb_mem_arbitrator_mode("disable")
-        self.execute("set global tidb_enable_auto_analyze=0")
+        self.execute("set global tidb_enable_auto_analyze=default")
         for c in self.execute("SHOW STATS_HEALTHY"):
             if c[-1] != 100:
                 self.execute("ANALYZE TABLE {}.{}".format(c[0], c[1]))
@@ -239,8 +239,8 @@ class Runner:
 
         if mode != "disable":
             self.execute("set global tidb_server_memory_limit='95%'")
-            self.execute("set global tidb_enable_gogc_tuner=0")
-            self.execute("set global tidb_gogc_tuner_threshold=0")
+            self.execute("set global tidb_enable_gogc_tuner=default")
+            self.execute("set global tidb_gogc_tuner_threshold=default")
         else:
             self.execute("set global tidb_gogc_tuner_threshold=default")
             self.execute("set global tidb_enable_gogc_tuner=default")

@@ -38,7 +38,7 @@ ifeq ("${ENABLE_FIPS}", "1")
 	GOEXPERIMENT = GOEXPERIMENT=boringcrypto
 endif
 
-ifeq ("1", "1")
+ifeq ("${NEXT_GEN}", "1")
 	BUILD_TAGS := $(BUILD_TAGS),nextgen
 	CHECK_BUILD_TAGS := $(CHECK_BUILD_TAGS),nextgen
 	UNIT_TEST_TAGS := $(UNIT_TEST_TAGS),nextgen
