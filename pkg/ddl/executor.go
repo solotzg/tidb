@@ -117,7 +117,6 @@ type Executor interface {
 	PurgeMaterializedViewLog(ctx sessionctx.Context, stmt *ast.PurgeMaterializedViewLogStmt) error
 	AlterMaterializedView(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewStmt) error
 	AlterMaterializedViewLog(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewLogStmt) error
-	RefreshMaterializedView(ctx sessionctx.Context, stmt *ast.RefreshMaterializedViewStmt) error
 	RecoverTable(ctx sessionctx.Context, recoverTableInfo *model.RecoverTableInfo) (err error)
 	RecoverSchema(ctx sessionctx.Context, recoverSchemaInfo *model.RecoverSchemaInfo) error
 	DropView(ctx sessionctx.Context, stmt *ast.DropTableStmt) (err error)
@@ -1865,8 +1864,8 @@ func isMultiSchemaChanges(specs []*ast.AlterTableSpec) bool {
 	return false
 }
 
-func isMVTableAlterTiFlashReplica(tblInfo *model.TableInfo, specs []*ast.AlterTableSpec) bool {
-	return tblInfo.MaterializedView != nil && len(specs) == 1 && specs[0].Tp == ast.AlterTableSetTiFlashReplica
+func isAlterTiFlashReplica(specs []*ast.AlterTableSpec) bool {
+	return len(specs) == 1 && specs[0].Tp == ast.AlterTableSetTiFlashReplica
 }
 
 func (e *executor) AlterTable(ctx context.Context, sctx sessionctx.Context, stmt *ast.AlterTableStmt) (err error) {
@@ -1888,13 +1887,10 @@ func (e *executor) alterTable(ctx context.Context, sctx sessionctx.Context, stmt
 	if tb.Meta().IsView() || tb.Meta().IsSequence() {
 		return dbterror.ErrWrongObject.GenWithStackByArgs(ident.Schema, ident.Name, "BASE TABLE")
 	}
-	allowMVSetTiFlashReplica := isMVTableAlterTiFlashReplica(tb.Meta(), validSpecs)
 	if !allowMaterializedViewRelated {
-		if allowMVSetTiFlashReplica {
-			if err := checkTableMaterializedViewConstraintsAllowMVTable(tb.Meta(), "ALTER TABLE"); err != nil {
-				return errors.Trace(err)
-			}
-		} else {
+		// ALTER TABLE ... SET TIFLASH REPLICA only changes replica placement metadata.
+		// It is safe for both MV tables and base tables with MV dependencies.
+		if !isAlterTiFlashReplica(validSpecs) {
 			if err := checkTableMaterializedViewConstraints(tb.Meta(), "ALTER TABLE"); err != nil {
 				return errors.Trace(err)
 			}

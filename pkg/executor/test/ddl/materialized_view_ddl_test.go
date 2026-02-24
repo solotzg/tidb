@@ -17,6 +17,7 @@ package ddl_test
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -169,9 +170,11 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	tk.MustExec("create index idx_mv_s on mv (s)")
 	tk.MustExec("drop index idx_mv_s on mv")
 
-	// ALTER TABLE ... SET TIFLASH REPLICA is allowed on MV table, but still forbidden on base.
+	// ALTER TABLE ... SET TIFLASH REPLICA is allowed on both base table and MV table.
 	err = tk.ExecToErr("alter table t set tiflash replica 1")
-	require.ErrorContains(t, err, "ALTER TABLE on base table with materialized view dependencies")
+	if err != nil {
+		require.NotContains(t, err.Error(), "ALTER TABLE on base table with materialized view dependencies")
+	}
 	err = tk.ExecToErr("alter table mv set tiflash replica 1")
 	if err != nil {
 		require.NotContains(t, err.Error(), "ALTER TABLE on materialized view table")
@@ -200,6 +203,64 @@ func TestMaterializedViewDDLBasic(t *testing.T) {
 	baseTable, err = is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("t"))
 	require.NoError(t, err)
 	require.True(t, baseTable.Meta().MaterializedViewBase == nil || (baseTable.Meta().MaterializedViewBase.MLogID == 0 && len(baseTable.Meta().MaterializedViewBase.MViewIDs) == 0))
+}
+
+func TestCreateMaterializedViewRefreshInfoRunningAndSuccess(t *testing.T) {
+	store := testkit.CreateMockStore(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+
+	const pauseBuildFailpoint = "github.com/pingcap/tidb/pkg/ddl/pauseCreateMaterializedViewBuild"
+	require.NoError(t, failpoint.Enable(pauseBuildFailpoint, "pause"))
+	enabled := true
+	defer func() {
+		if enabled {
+			require.NoError(t, failpoint.Disable(pauseBuildFailpoint))
+		}
+	}()
+
+	ddlDone := make(chan error, 1)
+	go func() {
+		tkDDL := testkit.NewTestKit(t, store)
+		tkDDL.MustExec("use test")
+		ddlDone <- tkDDL.ExecToErr("create materialized view mv_state (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+	}()
+
+	var initTS uint64
+	require.Eventually(t, func() bool {
+		rows := tk.MustQuery("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh").Rows()
+		if len(rows) != 1 {
+			return false
+		}
+		if fmt.Sprint(rows[0][0]) != "running" || fmt.Sprint(rows[0][1]) != "complete" {
+			return false
+		}
+		ts, err := strconv.ParseUint(fmt.Sprint(rows[0][2]), 10, 64)
+		if err != nil || ts == 0 {
+			return false
+		}
+		initTS = ts
+		return true
+	}, 30*time.Second, 100*time.Millisecond)
+
+	require.NoError(t, failpoint.Disable(pauseBuildFailpoint))
+	enabled = false
+
+	err := <-ddlDone
+	require.NoError(t, err)
+	tk.MustQuery("select a, s, cnt from mv_state order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+	rows := tk.MustQuery("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO, LAST_REFRESH_FAILED_REASON is null from mysql.tidb_mview_refresh").Rows()
+	require.Len(t, rows, 1)
+	require.Equal(t, "success", fmt.Sprint(rows[0][0]))
+	require.Equal(t, "complete", fmt.Sprint(rows[0][1]))
+	finalTS, err := strconv.ParseUint(fmt.Sprint(rows[0][2]), 10, 64)
+	require.NoError(t, err)
+	require.Greater(t, finalTS, initTS)
+	require.Equal(t, "1", fmt.Sprint(rows[0][3]))
 }
 
 func TestCreateMaterializedViewBuildFailureRollback(t *testing.T) {
@@ -598,4 +659,178 @@ func TestCreateTableLikeShouldNotCarryMaterializedViewMetadata(t *testing.T) {
 	require.NotNil(t, baseTable.Meta().MaterializedViewBase)
 	require.Equal(t, mlogSrc.Meta().ID, baseTable.Meta().MaterializedViewBase.MLogID)
 	require.Equal(t, []int64{mvSrc.Meta().ID}, baseTable.Meta().MaterializedViewBase.MViewIDs)
+}
+
+func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	require.Len(t, oldTSRow, 1)
+	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
+	require.NoError(t, err)
+	require.NotZero(t, oldTS)
+
+	// Make MV stale by changing base table.
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+	tk.MustExec("refresh materialized view mv complete")
+	refreshLastQueryStartTSRow := tk.MustQuery("select json_extract(@@tidb_last_query_info, '$.start_ts')").Rows()
+	require.Len(t, refreshLastQueryStartTSRow, 1)
+	refreshLastQueryStartTS, err := strconv.ParseUint(refreshLastQueryStartTSRow[0][0].(string), 10, 64)
+	require.NoError(t, err)
+	t.Logf("after refresh last_query_info start_ts: %d", refreshLastQueryStartTS)
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+
+	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	require.Len(t, newTSRow, 1)
+	newTS, err := strconv.ParseUint(fmt.Sprintf("%v", newTSRow[0][0]), 10, 64)
+	require.NoError(t, err)
+	t.Logf("mview refresh tso: old=%d new=%d", oldTS, newTS)
+
+	require.NotEqual(t, oldTS, newTS)
+
+	tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO = %d from mysql.tidb_mview_refresh where MVIEW_ID = %d", refreshLastQueryStartTS, mviewID)).
+		Check(testkit.Rows("success complete 1"))
+}
+
+func TestMaterializedViewRefreshCompleteConcurrentNowait(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	tkLocker := testkit.NewTestKit(t, store)
+	tkLocker.MustExec("use test")
+	tkLocker.MustExec("begin pessimistic")
+	tkLocker.MustQuery(fmt.Sprintf("select MVIEW_ID from mysql.tidb_mview_refresh where MVIEW_ID = %d for update", mviewID))
+
+	tkRefresh := testkit.NewTestKit(t, store)
+	tkRefresh.MustExec("use test")
+	err = tkRefresh.ExecToErr("refresh materialized view mv complete")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "NOWAIT")
+
+	tkLocker.MustExec("rollback")
+
+	// After releasing the lock, refresh should succeed.
+	tkRefresh.MustExec("refresh materialized view mv complete")
+}
+
+func TestMaterializedViewRefreshCompleteMissingRefreshInfoRow(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID))
+	err = tk.ExecToErr("refresh materialized view mv complete")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "tidb_mview_refresh")
+}
+
+func TestMaterializedViewRefreshWithSyncModeComplete(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+	tk.MustExec("refresh materialized view mv with sync mode complete")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+}
+
+func TestMaterializedViewRefreshCompleteFailureWritesRefreshInfo(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+	is := dom.InfoSchema()
+	mvTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("mv"))
+	require.NoError(t, err)
+	mviewID := mvTable.Meta().ID
+
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	require.Len(t, oldTSRow, 1)
+	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
+	require.NoError(t, err)
+	require.NotZero(t, oldTS)
+
+	// Create a unique index that will be violated after refresh.
+	tk.MustExec("create unique index idx_unique_s on mv (s)")
+
+	// Make the refreshed MV contain duplicate `s` values: sum(b) for a=2 becomes 15.
+	tk.MustExec("insert into t values (2, 8)")
+
+	err = tk.ExecToErr("refresh materialized view mv complete")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "Duplicate")
+
+	// MV data should remain unchanged due to transactional refresh.
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
+
+	tk.MustQuery(fmt.Sprintf(`select
+  LAST_REFRESH_RESULT,
+  LAST_REFRESH_TYPE,
+  LAST_SUCCESSFUL_REFRESH_READ_TSO = %d,
+  LAST_REFRESH_FAILED_REASON is not null
+from mysql.tidb_mview_refresh where MVIEW_ID = %d`, oldTS, mviewID)).Check(testkit.Rows("failed complete 1 1"))
+
+	reasonRow := tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_FAILED_REASON from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	require.Len(t, reasonRow, 1)
+	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "Duplicate")
+}
+
+func TestMaterializedViewRefreshCompleteForceConstraintCheckInPlacePessimisticOn(t *testing.T) {
+	store, _ := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t (a int not null, b int not null)")
+	tk.MustExec("insert into t values (1, 10), (1, 5), (2, 7)")
+	tk.MustExec("create materialized view log on t (a, b) purge immediate")
+	tk.MustExec("create materialized view mv (a, s, cnt) refresh fast next 300 as select a, sum(b), count(1) from t group by a")
+
+	// Turn off in-place constraint check for pessimistic txn, which disables SAVEPOINT in pessimistic txn.
+	// Refresh should still succeed because it forces the var to ON internally and restores it afterward.
+	tk.MustExec("set session tidb_constraint_check_in_place_pessimistic = off")
+	tk.MustExec("insert into t values (2, 3), (3, 4)")
+	tk.MustExec("refresh materialized view mv complete")
+	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
+	tk.MustQuery("select @@tidb_constraint_check_in_place_pessimistic").Check(testkit.Rows("0"))
 }
