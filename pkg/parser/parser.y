@@ -12650,8 +12650,8 @@ Statement:
 |	CreateStatisticsStmt
 |	DistributeTableStmt
 |	DoStmt
-|	RefreshMaterializedViewStmt
 |	PurgeMaterializedViewLogStmt
+|	RefreshMaterializedViewStmt
 |	DropDatabaseStmt
 |	DropIndexStmt
 |	DropTableStmt

@@ -277,10 +277,6 @@ func (e *executor) DropMaterializedViewLog(ctx sessionctx.Context, s *ast.DropMa
 	return e.dropTableObject(ctx, dropStmt.Tables, dropStmt.IfExists, tableObject, true)
 }
 
-func (*executor) PurgeMaterializedViewLog(sessionctx.Context, *ast.PurgeMaterializedViewLogStmt) error {
-	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("PURGE MATERIALIZED VIEW LOG is not supported")
-}
-
 func (e *executor) AlterMaterializedView(ctx sessionctx.Context, s *ast.AlterMaterializedViewStmt) error {
 	for _, action := range s.Actions {
 		switch action.Tp {
@@ -337,10 +333,6 @@ func (e *executor) AlterMaterializedView(ctx sessionctx.Context, s *ast.AlterMat
 
 func (*executor) AlterMaterializedViewLog(sessionctx.Context, *ast.AlterMaterializedViewLogStmt) error {
 	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("ALTER MATERIALIZED VIEW LOG ... PURGE is not supported")
-}
-
-func (*executor) RefreshMaterializedView(sessionctx.Context, *ast.RefreshMaterializedViewStmt) error {
-	return dbterror.ErrGeneralUnsupportedDDL.GenWithStack("REFRESH MATERIALIZED VIEW is not supported")
 }
 
 func buildMViewRefreshMeta(refresh *ast.MViewRefreshClause) (method, startWith, next string, _ error) {

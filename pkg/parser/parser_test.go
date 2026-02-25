@@ -5383,6 +5383,11 @@ func TestMaterializedViewStatements(t *testing.T) {
 			"PURGE MATERIALIZED VIEW LOG ON `t`",
 		},
 		{
+			"PURGE MATERIALIZED VIEW LOG ON test.t",
+			true,
+			"PURGE MATERIALIZED VIEW LOG ON `test`.`t`",
+		},
+		{
 			"REFRESH MATERIALIZED VIEW mv FAST",
 			true,
 			"REFRESH MATERIALIZED VIEW `mv` FAST",

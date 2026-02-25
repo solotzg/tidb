@@ -765,7 +765,9 @@ type SessionVars struct {
 	BatchSize
 	// DMLBatchSize indicates the number of rows batch-committed for a statement.
 	// It will be used when using LOAD DATA or BatchInsert or BatchDelete is on.
-	DMLBatchSize        int
+	DMLBatchSize int
+	// MLogPurgeBatchSize indicates the max rows deleted by one purge batch transaction.
+	MLogPurgeBatchSize  int
 	RetryLimit          int64
 	DisableTxnAutoRetry bool
 	*UserVars
@@ -1526,6 +1528,10 @@ type SessionVars struct {
 
 	// EnableTiFlashReadForWriteStmt indicates whether to enable TiFlash to read for write statements.
 	EnableTiFlashReadForWriteStmt bool
+
+	// InMaterializedViewMaintenance indicates the session is executing internal MV refresh / MV log purge statements.
+	// When enabled, TiFlash can be considered for the SELECT part of non-readonly statements even if sql_mode is strict.
+	InMaterializedViewMaintenance bool
 
 	// EnableUnsafeSubstitute indicates whether to enable generate column takes unsafe substitute.
 	EnableUnsafeSubstitute bool
@@ -2289,6 +2295,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 		MaxPagingSize:      DefMaxPagingSize,
 	}
 	vars.DMLBatchSize = DefDMLBatchSize
+	vars.MLogPurgeBatchSize = DefTiDBMLogPurgeBatchSize
 	vars.AllowBatchCop = DefTiDBAllowBatchCop
 	vars.allowMPPExecution = DefTiDBAllowMPPExecution
 	vars.HashExchangeWithNewCollation = DefTiDBHashExchangeWithNewCollation

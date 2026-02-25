@@ -312,10 +312,6 @@ func (d *Checker) DropMaterializedViewLog(ctx sessionctx.Context, stmt *ast.Drop
 	return d.realExecutor.DropMaterializedViewLog(ctx, stmt)
 }
 
-// PurgeMaterializedViewLog implements the DDL interface.
-func (d *Checker) PurgeMaterializedViewLog(ctx sessionctx.Context, stmt *ast.PurgeMaterializedViewLogStmt) error {
-	return d.realExecutor.PurgeMaterializedViewLog(ctx, stmt)
-}
 
 // AlterMaterializedView implements the DDL interface.
 func (d *Checker) AlterMaterializedView(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewStmt) error {
@@ -325,11 +321,6 @@ func (d *Checker) AlterMaterializedView(ctx sessionctx.Context, stmt *ast.AlterM
 // AlterMaterializedViewLog implements the DDL interface.
 func (d *Checker) AlterMaterializedViewLog(ctx sessionctx.Context, stmt *ast.AlterMaterializedViewLogStmt) error {
 	return d.realExecutor.AlterMaterializedViewLog(ctx, stmt)
-}
-
-// RefreshMaterializedView implements the DDL interface.
-func (d *Checker) RefreshMaterializedView(ctx sessionctx.Context, stmt *ast.RefreshMaterializedViewStmt) error {
-	return d.realExecutor.RefreshMaterializedView(ctx, stmt)
 }
 
 // DropTable implements the DDL interface.
