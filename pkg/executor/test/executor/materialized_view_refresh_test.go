@@ -49,7 +49,7 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, oldTSRow, 1)
 	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 	tk.MustExec("refresh materialized view mv complete")
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 10 2", "3 4 1"))
 
-	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, newTSRow, 1)
 	newTS, err := strconv.ParseUint(fmt.Sprintf("%v", newTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -70,8 +70,8 @@ func TestMaterializedViewRefreshCompleteBasic(t *testing.T) {
 
 	require.NotEqual(t, oldTS, newTS)
 
-	tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO > 0 from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).
-		Check(testkit.Rows("success complete 1"))
+	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO > 0 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestMaterializedViewRefreshFastBasic(t *testing.T) {
@@ -95,7 +95,7 @@ func TestMaterializedViewRefreshFastBasic(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, oldTSRow, 1)
 	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -110,14 +110,14 @@ func TestMaterializedViewRefreshFastBasic(t *testing.T) {
 	tk.MustExec("refresh materialized view mv fast")
 	tk.MustQuery("select a, cnt, s from mv order by a").Check(testkit.Rows("1 3 19", "3 1 4"))
 
-	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, newTSRow, 1)
 	newTS, err := strconv.ParseUint(fmt.Sprintf("%v", newTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
 	require.NotEqual(t, oldTS, newTS)
 
-	tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_RESULT, LAST_REFRESH_TYPE, LAST_SUCCESSFUL_REFRESH_READ_TSO > 0 from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).
-		Check(testkit.Rows("success fast 1"))
+	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO > 0 from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestMaterializedViewRefreshCompleteReadTSOSnapshotMatchesMV(t *testing.T) {
@@ -196,7 +196,7 @@ UPDATE variable_value = '%[2]s', comment = '%[3]s'`, safePointName, safePointVal
 
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 16 3", "2 7 1"))
 
-	tsRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	tsRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, tsRow, 1)
 	refreshReadTSO, err := strconv.ParseUint(fmt.Sprintf("%v", tsRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -226,7 +226,7 @@ func TestMaterializedViewRefreshCompleteAbortOnRefreshInfoReadTSOMismatch(t *tes
 	tk.MustExec("insert into t values (2, 3)")
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 
-	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, oldTSRow, 1)
 	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -268,14 +268,14 @@ func TestMaterializedViewRefreshCompleteAbortOnRefreshInfoReadTSOMismatch(t *tes
 	// Update refresh info row after refresh txn start_ts but before it does the locking read.
 	tkConcurrent := testkit.NewTestKit(t, store)
 	tkConcurrent.MustExec("use test")
-	tkConcurrent.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh set LAST_SUCCESSFUL_REFRESH_READ_TSO = %d where MVIEW_ID = %d", oldTS+1, mviewID))
+	tkConcurrent.MustExec(fmt.Sprintf("update mysql.tidb_mview_refresh_info set LAST_SUCCESS_READ_TSO = %d where MVIEW_ID = %d", oldTS+1, mviewID))
 
 	close(pauseCh)
 
 	select {
 	case err := <-refreshDone:
 		require.Error(t, err)
-		require.ErrorContains(t, err, "inconsistent LAST_SUCCESSFUL_REFRESH_READ_TSO")
+		require.ErrorContains(t, err, "inconsistent LAST_SUCCESS_READ_TSO")
 	case <-time.After(10 * time.Second):
 		t.Fatal("timeout waiting for refresh to finish")
 	}
@@ -283,21 +283,14 @@ func TestMaterializedViewRefreshCompleteAbortOnRefreshInfoReadTSOMismatch(t *tes
 	// Refresh should abort early and must not override refresh info or MV data.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 
-	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	newTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, newTSRow, 1)
 	newTS, err := strconv.ParseUint(fmt.Sprintf("%v", newTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
 	require.Equal(t, oldTS+1, newTS)
 
-	tk.MustQuery(fmt.Sprintf(`select
-  LAST_REFRESH_RESULT,
-  LAST_REFRESH_TYPE,
-  LAST_SUCCESSFUL_REFRESH_READ_TSO = %d,
-  LAST_REFRESH_FAILED_REASON is not null
-from mysql.tidb_mview_refresh where MVIEW_ID = %d`, oldTS+1, mviewID)).Check(testkit.Rows("failed complete 1 1"))
-	reasonRow := tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_FAILED_REASON from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
-	require.Len(t, reasonRow, 1)
-	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "inconsistent LAST_SUCCESSFUL_REFRESH_READ_TSO")
+	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO = %d from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", oldTS+1, mviewID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestMaterializedViewRefreshCompleteConcurrentNowait(t *testing.T) {
@@ -317,7 +310,7 @@ func TestMaterializedViewRefreshCompleteConcurrentNowait(t *testing.T) {
 	tkLocker := testkit.NewTestKit(t, store)
 	tkLocker.MustExec("use test")
 	tkLocker.MustExec("begin pessimistic")
-	tkLocker.MustQuery(fmt.Sprintf("select MVIEW_ID from mysql.tidb_mview_refresh where MVIEW_ID = %d for update", mviewID))
+	tkLocker.MustQuery(fmt.Sprintf("select MVIEW_ID from mysql.tidb_mview_refresh_info where MVIEW_ID = %d for update", mviewID))
 
 	tkRefresh := testkit.NewTestKit(t, store)
 	tkRefresh.MustExec("use test")
@@ -345,10 +338,10 @@ func TestMaterializedViewRefreshCompleteMissingRefreshInfoRow(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID))
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID))
 	err = tk.ExecToErr("refresh materialized view mv complete")
 	require.Error(t, err)
-	require.ErrorContains(t, err, "tidb_mview_refresh")
+	require.ErrorContains(t, err, "tidb_mview_refresh_info")
 }
 
 func TestMaterializedViewRefreshWithSyncModeComplete(t *testing.T) {
@@ -380,7 +373,7 @@ func TestMaterializedViewRefreshCompleteFailureWritesRefreshInfo(t *testing.T) {
 	require.NoError(t, err)
 	mviewID := mvTable.Meta().ID
 
-	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESSFUL_REFRESH_READ_TSO from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
+	oldTSRow := tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", mviewID)).Rows()
 	require.Len(t, oldTSRow, 1)
 	oldTS, err := strconv.ParseUint(fmt.Sprintf("%v", oldTSRow[0][0]), 10, 64)
 	require.NoError(t, err)
@@ -399,16 +392,8 @@ func TestMaterializedViewRefreshCompleteFailureWritesRefreshInfo(t *testing.T) {
 	// MV data should remain unchanged due to transactional refresh.
 	tk.MustQuery("select a, s, cnt from mv order by a").Check(testkit.Rows("1 15 2", "2 7 1"))
 
-	tk.MustQuery(fmt.Sprintf(`select
-  LAST_REFRESH_RESULT,
-  LAST_REFRESH_TYPE,
-  LAST_SUCCESSFUL_REFRESH_READ_TSO = %d,
-  LAST_REFRESH_FAILED_REASON is not null
-from mysql.tidb_mview_refresh where MVIEW_ID = %d`, oldTS, mviewID)).Check(testkit.Rows("failed complete 1 1"))
-
-	reasonRow := tk.MustQuery(fmt.Sprintf("select LAST_REFRESH_FAILED_REASON from mysql.tidb_mview_refresh where MVIEW_ID = %d", mviewID)).Rows()
-	require.Len(t, reasonRow, 1)
-	require.Contains(t, fmt.Sprintf("%v", reasonRow[0][0]), "Duplicate")
+	tk.MustQuery(fmt.Sprintf("select LAST_SUCCESS_READ_TSO = %d from mysql.tidb_mview_refresh_info where MVIEW_ID = %d", oldTS, mviewID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestMaterializedViewRefreshCompleteForceConstraintCheckInPlacePessimisticOn(t *testing.T) {

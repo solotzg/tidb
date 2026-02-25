@@ -84,6 +84,42 @@ func TestCreateMaterializedViewLogBasic(t *testing.T) {
 	tk.MustGetErrMsg("create materialized view log on t (a)", "[schema:1050]Table 'test.$mlog$t' already exists")
 }
 
+func TestCreateMaterializedViewLogPurgeNextWithoutStartWritesNextTime(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_next_only (a int)")
+
+	tk.MustExec("create materialized view log on t_purge_next_only (a) purge next 600")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_next_only"))
+	require.NoError(t, err)
+	tk.MustQuery("select next_time is not null from mysql.tidb_mlog_purge_info where mlog_id = ?", mlogTable.Meta().ID).
+		Check(testkit.Rows("1"))
+}
+
+func TestPurgeMaterializedViewLogDeferredAdvanceNextTimeFromExistingFutureSchedule(t *testing.T) {
+	store, dom := testkit.CreateMockStoreAndDomain(t)
+	tk := testkit.NewTestKit(t, store)
+	tk.MustExec("use test")
+	tk.MustExec("create table t_purge_future_next_time (a int)")
+	tk.MustExec("create materialized view log on t_purge_future_next_time (a) purge start with '2099-01-01 00:00:00' next 600")
+
+	is := dom.InfoSchema()
+	mlogTable, err := is.TableByName(context.Background(), pmodel.NewCIStr("test"), pmodel.NewCIStr("$mlog$t_purge_future_next_time"))
+	require.NoError(t, err)
+	mlogID := mlogTable.Meta().ID
+
+	tk.MustQuery(fmt.Sprintf("select cast(next_time as char) from mysql.tidb_mlog_purge_info where mlog_id = %d", mlogID)).
+		Check(testkit.Rows("2099-01-01 00:00:00"))
+
+	tk.MustExec("purge materialized view log on t_purge_future_next_time")
+
+	tk.MustQuery(fmt.Sprintf("select cast(next_time as char) from mysql.tidb_mlog_purge_info where mlog_id = %d", mlogID)).
+		Check(testkit.Rows("2099-01-01 00:10:00"))
+}
+
 func TestCreateMaterializedViewLogMetaColumnNameConflict(t *testing.T) {
 	store := testkit.CreateMockStore(t)
 	tk := testkit.NewTestKit(t, store)
@@ -322,8 +358,8 @@ func TestPurgeMaterializedViewLogBatchDelete(t *testing.T) {
 	tk.MustExec("purge materialized view log on t_purge_batch_delete")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_batch_delete`").Check(testkit.Rows("0"))
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
-		Check(testkit.Rows("5"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestPurgeMaterializedViewLogDeleteErrorNoDirtyWrite(t *testing.T) {
@@ -349,8 +385,8 @@ func TestPurgeMaterializedViewLogDeleteErrorNoDirtyWrite(t *testing.T) {
 	require.ErrorContains(t, err, "mock purge mlog delete error")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_delete_err`").Check(testkit.Rows("3"))
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
-		Check(testkit.Rows("0"))
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 }
 
 func TestPurgeMaterializedViewLogLockConflictAfterPartialSuccess(t *testing.T) {
@@ -377,7 +413,7 @@ func TestPurgeMaterializedViewLogLockConflictAfterPartialSuccess(t *testing.T) {
 	tk.MustQuery("show warnings").CheckContain("lock conflict after deleting 1 rows")
 
 	tk.MustQuery("select count(*) from `$mlog$t_purge_partial_conflict`").Check(testkit.Rows("2"))
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("1"))
 }
 
@@ -398,13 +434,13 @@ func TestPurgeMaterializedViewLogMissingPublicMViewRefreshRow(t *testing.T) {
 	require.NoError(t, err)
 	mlogID := mlogTable.Meta().ID
 
-	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh where mview_id = %d", mvID))
+	tk.MustExec(fmt.Sprintf("delete from mysql.tidb_mview_refresh_info where mview_id = %d", mvID))
 	err = tk.ExecToErr("purge materialized view log on t_purge_missing_public_refresh")
 	require.ErrorContains(t, err, "materialized view refresh info is missing")
 
-	// Purge failure should still be recorded in the state table.
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_TIME is not null, LAST_PURGE_ROWS, LAST_PURGE_DURATION >= 0 from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
-		Check(testkit.Rows("1 0 1"))
+	// Purge failure should not remove the schedule/lock row.
+	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 	// This version does not write mysql.tidb_mlog_purge_hist yet.
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("0"))
@@ -425,15 +461,15 @@ func TestPurgeMaterializedViewLogWritesState(t *testing.T) {
 
 	tk.MustExec("purge materialized view log on t_purge_state")
 
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_TIME is not null, LAST_PURGE_ROWS, LAST_PURGE_DURATION >= 0 from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
-		Check(testkit.Rows("1 0 1"))
+	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 	// This version does not write mysql.tidb_mlog_purge_hist yet.
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("0"))
 
 	tk.MustExec("purge materialized view log on t_purge_state")
-	tk.MustQuery(fmt.Sprintf("select LAST_PURGE_ROWS from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
-		Check(testkit.Rows("0"))
+	tk.MustQuery(fmt.Sprintf("select NEXT_TIME is null from mysql.tidb_mlog_purge_info where MLOG_ID = %d", mlogID)).
+		Check(testkit.Rows("1"))
 	// Still no history records.
 	tk.MustQuery(fmt.Sprintf("select count(*) from mysql.tidb_mlog_purge_hist where MLOG_ID = %d", mlogID)).
 		Check(testkit.Rows("0"))

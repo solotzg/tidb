@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/failpoint"
@@ -31,7 +30,6 @@ import (
 	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	storeerr "github.com/pingcap/tidb/pkg/store/driver/error"
-	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
 	"github.com/pingcap/tidb/pkg/util/dbterror"
 	plannererrors "github.com/pingcap/tidb/pkg/util/dbterror/plannererrors"
@@ -83,7 +81,7 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	kctx context.Context,
 	s *ast.PurgeMaterializedViewLogStmt,
 ) (err error) {
-	schemaName, baseTableMeta, mlogName, mlogID, err := e.resolvePurgeMaterializedViewLogMeta(s)
+	schemaName, baseTableMeta, mlogName, mlogInfo, mlogID, err := e.resolvePurgeMaterializedViewLogMeta(s)
 	if err != nil {
 		return err
 	}
@@ -99,7 +97,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 	defer e.ReleaseSysSession(kctx, purgeSctx)
 	sqlExec := purgeSctx.GetSQLExecutor()
 
-	purgeStartTime := time.Now()
 	totalPurgeRows := int64(0)
 	safePurgeTSOReady := false
 	safePurgeTSO := uint64(0)
@@ -167,16 +164,12 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			)
 		}
 
-		purgeEndTime := time.Now()
-		purgeDuration := purgeEndTime.Sub(purgeStartTime).Milliseconds()
-		purgeRowsForState := totalPurgeRows
-		if batchErr == nil {
-			purgeRowsForState += batchPurgeRows
+		if batchErr != nil {
+			_, _ = sqlExec.ExecuteInternal(kctx, "ROLLBACK")
+			return errors.Trace(batchErr)
 		}
-		// Keep state bookkeeping even when batchErr != nil. The failed DELETE statement has already
-		// been rolled back at statement level by session execution, so committing here will only
-		// persist this state update and will not include failed DELETE writes.
-		if err := updateMaterializedViewLogPurgeState(kctx, sqlExec, mlogID, purgeEndTime, purgeRowsForState, purgeDuration); err != nil {
+
+		if err := updateMaterializedViewLogPurgeNextTime(kctx, sqlExec, mlogID, mlogInfo); err != nil {
 			_, _ = sqlExec.ExecuteInternal(kctx, "ROLLBACK")
 			return err
 		}
@@ -184,9 +177,6 @@ func (e *PurgeMaterializedViewLogExec) executePurgeMaterializedViewLog(
 			return errors.Trace(err)
 		}
 
-		if batchErr != nil {
-			return errors.Trace(batchErr)
-		}
 		totalPurgeRows += batchPurgeRows
 		if batchPurgeRows < batchSize {
 			return nil
@@ -223,13 +213,13 @@ func calcMaterializedViewLogSafePurgeTSO(
 	if len(publicIDs) > 0 {
 		// Public MVs should always have a refresh record. If not, treat it as metadata inconsistency and abort.
 		countSQL := fmt.Sprintf(
-			"SELECT COUNT(1) FROM mysql.tidb_mview_refresh WHERE MVIEW_ID IN (%s)",
+			"SELECT COUNT(1) FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID IN (%s)",
 			buildINList(publicIDs),
 		)
 		countRows, err := sqlexec.ExecSQL(kctx, sqlExec, countSQL)
 		if err != nil {
 			if infoschema.ErrTableNotExists.Equal(err) {
-				return safePurgeTSO, errors.New("required system table mysql.tidb_mview_refresh does not exist")
+				return safePurgeTSO, errors.New("required system table mysql.tidb_mview_refresh_info does not exist")
 			}
 			return safePurgeTSO, errors.Trace(err)
 		}
@@ -262,13 +252,13 @@ func calcMaterializedViewLogSafePurgeTSO(
 	}
 	if len(allIDs) > 0 {
 		minSQL := fmt.Sprintf(
-			"SELECT MIN(COALESCE(LAST_SUCCESSFUL_REFRESH_READ_TSO, 0)) FROM mysql.tidb_mview_refresh WHERE MVIEW_ID IN (%s)",
+			"SELECT MIN(COALESCE(LAST_SUCCESS_READ_TSO, 0)) FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID IN (%s)",
 			buildINList(allIDs),
 		)
 		minRows, err := sqlexec.ExecSQL(kctx, sqlExec, minSQL)
 		if err != nil {
 			if infoschema.ErrTableNotExists.Equal(err) {
-				return safePurgeTSO, errors.New("required system table mysql.tidb_mview_refresh does not exist")
+				return safePurgeTSO, errors.New("required system table mysql.tidb_mview_refresh_info does not exist")
 			}
 			return safePurgeTSO, errors.Trace(err)
 		}
@@ -291,25 +281,25 @@ func calcMaterializedViewLogSafePurgeTSO(
 
 func (e *PurgeMaterializedViewLogExec) resolvePurgeMaterializedViewLogMeta(
 	s *ast.PurgeMaterializedViewLogStmt,
-) (schemaName pmodel.CIStr, baseTableMeta *model.TableInfo, mlogName pmodel.CIStr, mlogID int64, _ error) {
+) (schemaName pmodel.CIStr, baseTableMeta *model.TableInfo, mlogName pmodel.CIStr, mlogInfo *model.MaterializedViewLogInfo, mlogID int64, _ error) {
 	is := e.Ctx().GetDomainInfoSchema().(infoschema.InfoSchema)
 	schemaName = s.Table.Schema
 	if schemaName.O == "" {
 		if e.Ctx().GetSessionVars().CurrentDB == "" {
-			return schemaName, nil, mlogName, 0, errors.Trace(plannererrors.ErrNoDB)
+			return schemaName, nil, mlogName, nil, 0, errors.Trace(plannererrors.ErrNoDB)
 		}
 		schemaName = pmodel.NewCIStr(e.Ctx().GetSessionVars().CurrentDB)
 		s.Table.Schema = schemaName
 	}
 	if _, ok := is.SchemaByName(schemaName); !ok {
-		return schemaName, nil, mlogName, 0, infoschema.ErrDatabaseNotExists.GenWithStackByArgs(schemaName)
+		return schemaName, nil, mlogName, nil, 0, infoschema.ErrDatabaseNotExists.GenWithStackByArgs(schemaName)
 	}
 	baseTable, err := is.TableByName(context.Background(), schemaName, s.Table.Name)
 	if err != nil {
-		return schemaName, nil, mlogName, 0, err
+		return schemaName, nil, mlogName, nil, 0, err
 	}
 	if baseTable.Meta().IsView() || baseTable.Meta().IsSequence() || baseTable.Meta().TempTableType != model.TempTableNone {
-		return schemaName, nil, mlogName, 0, dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, s.Table.Name, "BASE TABLE")
+		return schemaName, nil, mlogName, nil, 0, dbterror.ErrWrongObject.GenWithStackByArgs(schemaName, s.Table.Name, "BASE TABLE")
 	}
 	baseTableMeta = baseTable.Meta()
 	baseTableID := baseTableMeta.ID
@@ -318,16 +308,16 @@ func (e *PurgeMaterializedViewLogExec) resolvePurgeMaterializedViewLogMeta(
 	mlogTable, err := is.TableByName(context.Background(), schemaName, mlogName)
 	if err != nil {
 		if infoschema.ErrTableNotExists.Equal(err) {
-			return schemaName, baseTableMeta, mlogName, 0, errors.Errorf(
+			return schemaName, baseTableMeta, mlogName, nil, 0, errors.Errorf(
 				"materialized view log does not exist for base table %s.%s",
 				schemaName.O,
 				s.Table.Name.O,
 			)
 		}
-		return schemaName, baseTableMeta, mlogName, 0, err
+		return schemaName, baseTableMeta, mlogName, nil, 0, err
 	}
 	if mlogTable.Meta().MaterializedViewLog == nil || mlogTable.Meta().MaterializedViewLog.BaseTableID != baseTableID {
-		return schemaName, baseTableMeta, mlogName, 0, errors.Errorf(
+		return schemaName, baseTableMeta, mlogName, nil, 0, errors.Errorf(
 			"table %s.%s is not a materialized view log for base table %s.%s",
 			schemaName.O,
 			mlogName.O,
@@ -335,9 +325,10 @@ func (e *PurgeMaterializedViewLogExec) resolvePurgeMaterializedViewLogMeta(
 			s.Table.Name.O,
 		)
 	}
+	mlogInfo = mlogTable.Meta().MaterializedViewLog
 	mlogID = mlogTable.Meta().ID
 
-	return schemaName, baseTableMeta, mlogName, mlogID, nil
+	return schemaName, baseTableMeta, mlogName, mlogInfo, mlogID, nil
 }
 
 func acquireMaterializedViewLogPurgeLock(
@@ -484,22 +475,25 @@ func purgeMaterializedViewLogData(
 	return int64(sessVars.StmtCtx.AffectedRows()), nil
 }
 
-func updateMaterializedViewLogPurgeState(
+func updateMaterializedViewLogPurgeNextTime(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mlogID int64,
-	purgeEndTime time.Time,
-	purgeRows int64,
-	purgeDurationMillis int64,
+	mlogInfo *model.MaterializedViewLogInfo,
 ) error {
-	purgeEndTimeStr := purgeEndTime.Format(types.TimeFSPFormat)
-	updatePurgeSQL := sqlescape.MustEscapeSQL(
-		"UPDATE mysql.tidb_mlog_purge_info SET LAST_PURGE_TIME = %?, LAST_PURGE_ROWS = %?, LAST_PURGE_DURATION = %? WHERE MLOG_ID = %?",
-		purgeEndTimeStr,
-		purgeRows,
-		purgeDurationMillis,
-		mlogID,
-	)
+	updatePurgeSQL := sqlescape.MustEscapeSQL("UPDATE mysql.tidb_mlog_purge_info SET NEXT_TIME = NULL WHERE MLOG_ID = %?", mlogID)
+	if mlogInfo != nil && strings.EqualFold(mlogInfo.PurgeMethod, "DEFERRED") {
+		nextExpr := strings.TrimSpace(mlogInfo.PurgeNext)
+		if nextExpr != "" {
+			nextTimeExpr := buildNextTimeAdvanceExpr(nextExpr)
+			updatePurgeSQL = fmt.Sprintf(
+				"UPDATE mysql.tidb_mlog_purge_info SET NEXT_TIME = %s WHERE MLOG_ID = %d",
+				nextTimeExpr,
+				mlogID,
+			)
+		}
+	}
+
 	_, err := sqlExec.ExecuteInternal(kctx, updatePurgeSQL)
 	failpoint.Inject("mockUpdateMaterializedViewLogPurgeStateErr", func(val failpoint.Value) {
 		if val.(bool) {
@@ -516,7 +510,7 @@ func updateMaterializedViewLogPurgeState(
 }
 
 func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx context.Context, s *ast.RefreshMaterializedViewStmt) error {
-	refreshType, err := validateRefreshMaterializedViewStmt(s)
+	_, err := validateRefreshMaterializedViewStmt(s)
 	if err != nil {
 		return err
 	}
@@ -559,19 +553,16 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 	failpoint.Inject("pauseRefreshMaterializedViewAfterBegin", func() {})
 
 	mviewID := tblInfo.ID
-	lockedReadTSO, lockedReadTSONull, persistFailureOnErr, err := lockAndValidateRefreshInfoRow(kctx, sqlExec, mviewID)
+	lockedReadTSO, lockedReadTSONull, err := lockAndValidateRefreshInfoRow(kctx, sqlExec, mviewID)
 	if err != nil {
-		if persistFailureOnErr {
-			return persistRefreshFailureAndCommit(kctx, sqlExec, refreshType, mviewID, err, &txnCommitted)
-		}
 		return err
 	}
 
 	var lastSuccessfulRefreshReadTSO int64
 	if s.Type == ast.RefreshMaterializedViewTypeFast {
-		// LAST_SUCCESSFUL_REFRESH_READ_TSO is BIGINT DEFAULT NULL. FAST refresh requires it to be non-NULL.
+		// LAST_SUCCESS_READ_TSO is BIGINT DEFAULT NULL. FAST refresh requires it to be non-NULL.
 		if lockedReadTSONull {
-			return errors.New("refresh materialized view fast: LAST_SUCCESSFUL_REFRESH_READ_TSO is NULL")
+			return errors.New("refresh materialized view fast: LAST_SUCCESS_READ_TSO is NULL")
 		}
 		lastSuccessfulRefreshReadTSO = lockedReadTSO
 	}
@@ -604,14 +595,14 @@ func (e *RefreshMaterializedViewExec) executeRefreshMaterializedView(kctx contex
 		if _, rollbackErr := sqlExec.ExecuteInternal(kctx, "ROLLBACK TO SAVEPOINT "+refreshSavepoint); rollbackErr != nil {
 			return errors.Annotatef(rollbackErr, "refresh materialized view: failed to rollback MV data changes after error %v", err)
 		}
-		return persistRefreshFailureAndCommit(kctx, sqlExec, refreshType, mviewID, err, &txnCommitted)
+		return errors.Trace(err)
 	}
 
 	refreshReadTSO, err := getRefreshReadTSOForSuccess(s.Type, sessVars, startTS)
 	if err != nil {
 		return err
 	}
-	return persistRefreshSuccessAndCommit(kctx, sqlExec, refreshType, mviewID, refreshReadTSO, &txnCommitted)
+	return persistRefreshSuccessAndCommit(kctx, sqlExec, tblInfo, mviewID, refreshReadTSO, &txnCommitted)
 }
 
 func validateRefreshMaterializedViewStmt(s *ast.RefreshMaterializedViewStmt) (string, error) {
@@ -677,36 +668,36 @@ func lockAndValidateRefreshInfoRow(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
 	mviewID int64,
-) (lockedReadTSO int64, lockedReadTSONull bool, persistFailureOnErr bool, err error) {
+) (lockedReadTSO int64, lockedReadTSONull bool, err error) {
 	lockRS, err := sqlExec.ExecuteInternal(
 		kctx,
-		// Also select LAST_SUCCESSFUL_REFRESH_READ_TSO so FAST refresh can reuse this mutex/metadata load path.
-		"SELECT MVIEW_ID, LAST_SUCCESSFUL_REFRESH_READ_TSO FROM mysql.tidb_mview_refresh WHERE MVIEW_ID = %? FOR UPDATE NOWAIT",
+		// Also select LAST_SUCCESS_READ_TSO so FAST refresh can reuse this mutex/metadata load path.
+		"SELECT MVIEW_ID, LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %? FOR UPDATE NOWAIT",
 		mviewID,
 	)
 	if infoschema.ErrTableNotExists.Equal(err) {
-		return 0, false, false, errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh does not exist")
+		return 0, false, errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_info does not exist")
 	}
 	if err != nil {
-		return 0, false, false, errors.Trace(err)
+		return 0, false, errors.Trace(err)
 	}
 	if lockRS == nil {
-		return 0, false, false, errors.New("refresh materialized view: cannot lock mysql.tidb_mview_refresh row")
+		return 0, false, errors.New("refresh materialized view: cannot lock mysql.tidb_mview_refresh_info row")
 	}
 	lockRows, drainErr := sqlexec.DrainRecordSet(kctx, lockRS, 1)
 	closeErr := lockRS.Close()
 	if drainErr != nil {
-		return 0, false, false, errors.Trace(drainErr)
+		return 0, false, errors.Trace(drainErr)
 	}
 	if closeErr != nil {
-		return 0, false, false, errors.Trace(closeErr)
+		return 0, false, errors.Trace(closeErr)
 	}
 	if len(lockRows) == 0 {
-		return 0, false, false, errors.New("refresh materialized view: refresh info row missing in mysql.tidb_mview_refresh")
+		return 0, false, errors.New("refresh materialized view: refresh info row missing in mysql.tidb_mview_refresh_info")
 	}
 
 	// In pessimistic txn, `SELECT ... FOR UPDATE` reads at txn's `for_update_ts`, while normal `SELECT`
-	// reads at txn's `start_ts`. Re-check LAST_SUCCESSFUL_REFRESH_READ_TSO using a normal SELECT to
+	// reads at txn's `start_ts`. Re-check LAST_SUCCESS_READ_TSO using a normal SELECT to
 	// ensure the refresh info row is consistent between these 2 read timestamps.
 	lockedRow := lockRows[0]
 	lockedReadTSONull = lockedRow.IsNull(1)
@@ -716,25 +707,25 @@ func lockAndValidateRefreshInfoRow(
 
 	recheckRS, err := sqlExec.ExecuteInternal(
 		kctx,
-		"SELECT LAST_SUCCESSFUL_REFRESH_READ_TSO FROM mysql.tidb_mview_refresh WHERE MVIEW_ID = %?",
+		"SELECT LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE MVIEW_ID = %?",
 		mviewID,
 	)
 	if err != nil {
-		return 0, false, false, errors.Trace(err)
+		return 0, false, errors.Trace(err)
 	}
 	if recheckRS == nil {
-		return 0, false, false, errors.New("refresh materialized view: cannot re-check mysql.tidb_mview_refresh row")
+		return 0, false, errors.New("refresh materialized view: cannot re-check mysql.tidb_mview_refresh_info row")
 	}
 	recheckRows, drainErr := sqlexec.DrainRecordSet(kctx, recheckRS, 1)
 	closeErr = recheckRS.Close()
 	if drainErr != nil {
-		return 0, false, false, errors.Trace(drainErr)
+		return 0, false, errors.Trace(drainErr)
 	}
 	if closeErr != nil {
-		return 0, false, false, errors.Trace(closeErr)
+		return 0, false, errors.Trace(closeErr)
 	}
 	if len(recheckRows) == 0 {
-		return 0, false, false, errors.New("refresh materialized view: refresh info row missing in mysql.tidb_mview_refresh")
+		return 0, false, errors.New("refresh materialized view: refresh info row missing in mysql.tidb_mview_refresh_info")
 	}
 	recheckRow := recheckRows[0]
 	recheckReadTSONull := recheckRow.IsNull(0)
@@ -743,9 +734,9 @@ func lockAndValidateRefreshInfoRow(
 		recheckReadTSO = recheckRow.GetInt64(0)
 	}
 	if lockedReadTSONull != recheckReadTSONull || (!lockedReadTSONull && lockedReadTSO != recheckReadTSO) {
-		return 0, false, true, errors.New("refresh materialized view: inconsistent LAST_SUCCESSFUL_REFRESH_READ_TSO between locking read and snapshot read")
+		return 0, false, errors.New("refresh materialized view: inconsistent LAST_SUCCESS_READ_TSO between locking read and snapshot read")
 	}
-	return lockedReadTSO, lockedReadTSONull, false, nil
+	return lockedReadTSO, lockedReadTSONull, nil
 }
 
 func executeRefreshMaterializedViewDataChanges(
@@ -845,34 +836,6 @@ func drainRefreshRecordSet(kctx context.Context, rs sqlexec.RecordSet) error {
 	}
 }
 
-func persistRefreshFailureAndCommit(
-	kctx context.Context,
-	sqlExec sqlexec.SQLExecutor,
-	refreshType string,
-	mviewID int64,
-	refreshErr error,
-	txnCommitted *bool,
-) error {
-	updateFailedSQL := `UPDATE mysql.tidb_mview_refresh
-SET
-	LAST_REFRESH_RESULT = 'failed',
-	LAST_REFRESH_TYPE = %?,
-	LAST_REFRESH_TIME = NOW(6),
-	LAST_REFRESH_FAILED_REASON = %?
-WHERE MVIEW_ID = %?`
-	if _, err := sqlExec.ExecuteInternal(kctx, updateFailedSQL, refreshType, refreshErr.Error(), mviewID); err != nil {
-		if infoschema.ErrTableNotExists.Equal(err) {
-			return errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh does not exist")
-		}
-		return errors.Annotatef(err, "refresh materialized view: failed to persist refresh failure info (original error: %v)", refreshErr)
-	}
-	if _, err := sqlExec.ExecuteInternal(kctx, "COMMIT"); err != nil {
-		return errors.Trace(err)
-	}
-	*txnCommitted = true
-	return errors.Trace(refreshErr)
-}
-
 func getRefreshReadTSOForSuccess(
 	refreshType ast.RefreshMaterializedViewType,
 	sessVars *variable.SessionVars,
@@ -880,7 +843,7 @@ func getRefreshReadTSOForSuccess(
 ) (uint64, error) {
 	// COMPLETE refresh uses `DELETE + INSERT INTO ... SELECT ...` and the SELECT part reads at txn's
 	// `for_update_ts` in pessimistic txn, so record `for_update_ts` to ensure
-	// LAST_SUCCESSFUL_REFRESH_READ_TSO matches the MV data snapshot.
+	// LAST_SUCCESS_READ_TSO matches the MV data snapshot.
 	//
 	// For FAST refresh, the actual execution is not implemented yet; keep the original behavior and
 	// record txn start_ts when it succeeds in the future.
@@ -897,22 +860,15 @@ func getRefreshReadTSOForSuccess(
 func persistRefreshSuccessAndCommit(
 	kctx context.Context,
 	sqlExec sqlexec.SQLExecutor,
-	refreshType string,
+	tblInfo *model.TableInfo,
 	mviewID int64,
 	refreshReadTSO uint64,
 	txnCommitted *bool,
 ) error {
-	updateSQL := `UPDATE mysql.tidb_mview_refresh
-SET
-	LAST_REFRESH_RESULT = 'success',
-	LAST_REFRESH_TYPE = %?,
-	LAST_REFRESH_TIME = NOW(6),
-	LAST_SUCCESSFUL_REFRESH_READ_TSO = %?,
-	LAST_REFRESH_FAILED_REASON = NULL
-WHERE MVIEW_ID = %?`
-	if _, err := sqlExec.ExecuteInternal(kctx, updateSQL, refreshType, refreshReadTSO, mviewID); err != nil {
+	updateSQL := buildRefreshInfoSuccessUpdateSQL(tblInfo, mviewID, refreshReadTSO)
+	if _, err := sqlExec.ExecuteInternal(kctx, updateSQL); err != nil {
 		if infoschema.ErrTableNotExists.Equal(err) {
-			return errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh does not exist")
+			return errors.New("refresh materialized view: required system table mysql.tidb_mview_refresh_info does not exist")
 		}
 		return errors.Trace(err)
 	}
@@ -921,4 +877,34 @@ WHERE MVIEW_ID = %?`
 	}
 	*txnCommitted = true
 	return nil
+}
+
+func buildRefreshInfoSuccessUpdateSQL(tblInfo *model.TableInfo, mviewID int64, refreshReadTSO uint64) string {
+	updateSQL := sqlescape.MustEscapeSQL(
+		"UPDATE mysql.tidb_mview_refresh_info SET LAST_SUCCESS_READ_TSO = %?, NEXT_TIME = NULL WHERE MVIEW_ID = %?",
+		refreshReadTSO,
+		mviewID,
+	)
+	if tblInfo == nil || tblInfo.MaterializedView == nil || !strings.EqualFold(tblInfo.MaterializedView.RefreshMethod, "FAST") {
+		return updateSQL
+	}
+	nextExpr := strings.TrimSpace(tblInfo.MaterializedView.RefreshNext)
+	if nextExpr == "" {
+		return updateSQL
+	}
+	nextTimeExpr := buildNextTimeAdvanceExpr(nextExpr)
+	return fmt.Sprintf(
+		"UPDATE mysql.tidb_mview_refresh_info SET LAST_SUCCESS_READ_TSO = %d, NEXT_TIME = %s WHERE MVIEW_ID = %d",
+		refreshReadTSO,
+		nextTimeExpr,
+		mviewID,
+	)
+}
+
+func buildNextTimeAdvanceExpr(nextExpr string) string {
+	// Keep future schedules anchored to existing NEXT_TIME, while overdue/NULL schedules restart from NOW(6).
+	return fmt.Sprintf(
+		"DATE_ADD(IF(NEXT_TIME IS NULL OR NEXT_TIME < NOW(6), NOW(6), NEXT_TIME), INTERVAL (%s) SECOND)",
+		nextExpr,
+	)
 }
