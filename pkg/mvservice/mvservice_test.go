@@ -269,10 +269,16 @@ func TestTaskExecutorBackpressure(t *testing.T) {
 		t.Fatalf("task should still be blocked")
 	default:
 	}
+	require.Eventually(t, func() bool {
+		return exec.metrics.counters.backpressureCount.Load() > 0
+	}, time.Second, 10*time.Millisecond)
 
 	controller.blocked.Store(false)
 	module.Advance(time.Second)
 	waitForSignal(t, done, time.Hour)
+	require.Eventually(t, func() bool {
+		return exec.metrics.gauges.backpressureBlockedCount.Load() == 0
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestTaskExecutorBackpressureCheckDoesNotBlockSubmit(t *testing.T) {
@@ -368,6 +374,10 @@ func TestTaskExecutorCloseInterruptsBackpressureWait(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close should interrupt backpressure wait")
 	}
+	require.Eventually(t, func() bool {
+		return exec.metrics.gauges.backpressureBlockedCount.Load() == 0
+	}, time.Second, 10*time.Millisecond)
+	require.Greater(t, exec.metrics.counters.backpressureCount.Load(), int64(0))
 }
 
 func TestCPUMemBackpressureController(t *testing.T) {

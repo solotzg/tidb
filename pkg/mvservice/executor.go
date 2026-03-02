@@ -35,16 +35,18 @@ type TaskExecutor struct {
 
 	metrics struct {
 		counters struct {
-			submittedCount atomic.Int64
-			finishedCount  atomic.Int64
-			failedCount    atomic.Int64
-			timeoutCount   atomic.Int64
-			rejectedCount  atomic.Int64
+			submittedCount    atomic.Int64
+			finishedCount     atomic.Int64
+			failedCount       atomic.Int64
+			timeoutCount      atomic.Int64
+			rejectedCount     atomic.Int64
+			backpressureCount atomic.Int64
 		}
 		gauges struct {
-			runningCount         atomic.Int64
-			waitingCount         atomic.Int64
-			timedOutRunningCount atomic.Int64
+			runningCount             atomic.Int64
+			waitingCount             atomic.Int64
+			timedOutRunningCount     atomic.Int64
+			backpressureBlockedCount atomic.Int64
 		}
 	}
 
@@ -314,10 +316,13 @@ func (e *TaskExecutor) nextTask() (taskRequest, bool) {
 		e.queue.mu.Unlock()
 
 		if blocked, delay := e.shouldBackpressure(); blocked {
+			e.metrics.counters.backpressureCount.Add(1)
+			e.metrics.gauges.backpressureBlockedCount.Add(1)
 			select {
 			case <-e.closeCh:
 			case <-mvsAfter(delay):
 			}
+			e.metrics.gauges.backpressureBlockedCount.Add(-1)
 			continue
 		}
 

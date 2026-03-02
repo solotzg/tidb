@@ -28,6 +28,7 @@ const (
 	mvMetricTaskStatusTaskExecRunning         = "exec_running"
 	mvMetricTaskStatusTaskExecWaiting         = "exec_waiting"
 	mvMetricTaskStatusTaskExecTimedOutRunning = "exec_timed_out_running"
+	mvMetricTaskStatusTaskExecBackpressureBlk = "exec_backpressure_blocked"
 
 	mvMetricTaskStatusMVTotal       = "mv_total"
 	mvMetricTaskStatusMVLogTotal    = "mvlog_total"
@@ -43,15 +44,17 @@ var (
 
 	MVServiceRunEventCounterVec *prometheus.CounterVec
 
-	MVTaskExecutorSubmittedCounter prometheus.Counter
-	MVTaskExecutorFinishedCounter  prometheus.Counter
-	MVTaskExecutorFailedCounter    prometheus.Counter
-	MVTaskExecutorTimeoutCounter   prometheus.Counter
-	MVTaskExecutorRejectedCounter  prometheus.Counter
+	MVTaskExecutorSubmittedCounter    prometheus.Counter
+	MVTaskExecutorFinishedCounter     prometheus.Counter
+	MVTaskExecutorFailedCounter       prometheus.Counter
+	MVTaskExecutorTimeoutCounter      prometheus.Counter
+	MVTaskExecutorRejectedCounter     prometheus.Counter
+	MVTaskExecutorBackpressureCounter prometheus.Counter
 
 	MVTaskExecutorRunningTaskGauge         prometheus.Gauge
 	MVTaskExecutorWaitingTaskGauge         prometheus.Gauge
 	MVTaskExecutorTimedOutRunningTaskGauge prometheus.Gauge
+	MVTaskExecutorBackpressureBlockedGauge prometheus.Gauge
 
 	MVServiceMVRefreshTotalGauge    prometheus.Gauge
 	MVServiceMVLogPurgeTotalGauge   prometheus.Gauge
@@ -86,6 +89,14 @@ func InitMVMetrics() {
 			Help:      "Counter of MV service scheduler and task executor events.",
 		}, []string{LblType})
 
+	MVTaskExecutorBackpressureCounter = NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "tidb",
+			Subsystem: "mv",
+			Name:      "service_exec_backpressure_total",
+			Help:      "Counter of MV task executor backpressure waits.",
+		})
+
 	MVTaskExecutorSubmittedCounter = MVServiceRunEventCounterVec.WithLabelValues(mvMetricRunEventTaskExecSubmitted)
 	MVTaskExecutorFinishedCounter = MVServiceRunEventCounterVec.WithLabelValues(mvMetricRunEventTaskExecFinished)
 	MVTaskExecutorFailedCounter = MVServiceRunEventCounterVec.WithLabelValues(mvMetricRunEventTaskExecFailed)
@@ -94,6 +105,7 @@ func InitMVMetrics() {
 	MVTaskExecutorRunningTaskGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusTaskExecRunning)
 	MVTaskExecutorWaitingTaskGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusTaskExecWaiting)
 	MVTaskExecutorTimedOutRunningTaskGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusTaskExecTimedOutRunning)
+	MVTaskExecutorBackpressureBlockedGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusTaskExecBackpressureBlk)
 
 	MVServiceMVRefreshTotalGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusMVTotal)
 	MVServiceMVLogPurgeTotalGauge = MVServiceTaskStatusGaugeVec.WithLabelValues(mvMetricTaskStatusMVLogTotal)
