@@ -68,7 +68,7 @@ func (m *mockServerHelper) getAllServerInfo(_ context.Context) (map[string]serve
 	return res, nil
 }
 
-func newServerConsistentHashForTest(mapping map[string]uint32, helper ServerDiscovery, selfID string, serverIDs ...string) *ServerConsistentHash {
+func newServerConsistentHashForTest(mapping map[string]uint64, helper ServerDiscovery, selfID string, serverIDs ...string) *ServerConsistentHash {
 	sch := NewServerConsistentHash(context.Background(), 1, helper)
 	sch.chash.hashFunc = mustHash(mapping)
 	sch.ID = selfID
@@ -101,7 +101,7 @@ func assertAvailableForNode(t *testing.T, sch *ServerConsistentHash, nodeID stri
 }
 
 func TestServerConsistentHashAddRemoveAndAvailable(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"nodeB#0": 20,
 		"key-low": 5,
@@ -133,18 +133,18 @@ func TestServerConsistentHashAvailableSupportsDifferentKeyTypes(t *testing.T) {
 	type testCase struct {
 		name     string
 		key      any
-		hashFunc func(t *testing.T) func([]byte) uint32
+		hashFunc func(t *testing.T) func([]byte) uint64
 	}
 
 	testCases := []testCase{
 		{
 			name: "int64",
 			key:  int64(123456789),
-			hashFunc: func(t *testing.T) func([]byte) uint32 {
+			hashFunc: func(t *testing.T) func([]byte) uint64 {
 				key := int64(123456789)
 				var keyBytes [8]byte
 				binary.BigEndian.PutUint64(keyBytes[:], uint64(key))
-				return func(data []byte) uint32 {
+				return func(data []byte) uint64 {
 					switch string(data) {
 					case "nodeA#0":
 						return 10
@@ -164,8 +164,8 @@ func TestServerConsistentHashAvailableSupportsDifferentKeyTypes(t *testing.T) {
 		{
 			name: "bytes",
 			key:  []byte("key-mid"),
-			hashFunc: func(t *testing.T) func([]byte) uint32 {
-				return func(data []byte) uint32 {
+			hashFunc: func(t *testing.T) func([]byte) uint64 {
+				return func(data []byte) uint64 {
 					switch string(data) {
 					case "nodeA#0":
 						return 10
@@ -196,7 +196,7 @@ func TestServerConsistentHashAvailableSupportsDifferentKeyTypes(t *testing.T) {
 }
 
 func TestServerConsistentHashFetchAppliesFilter(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"nodeB#0": 20,
 		"key-mid": 15,
@@ -227,7 +227,7 @@ func TestServerConsistentHashFetchAppliesFilter(t *testing.T) {
 }
 
 func TestServerConsistentHashFetchNoChange(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"key-mid": 15,
 	}
@@ -269,7 +269,7 @@ func TestServerConsistentHashFetchNoChange(t *testing.T) {
 }
 
 func TestServerConsistentHashInit(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"key-mid": 15,
 	}

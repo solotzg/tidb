@@ -31,8 +31,8 @@ func installMockTimeForTest(t *testing.T) *MockTimeModule {
 	return module
 }
 
-func mustHash(mapping map[string]uint32) func([]byte) uint32 {
-	return func(data []byte) uint32 {
+func mustHash(mapping map[string]uint64) func([]byte) uint64 {
+	return func(data []byte) uint64 {
 		if v, ok := mapping[string(data)]; ok {
 			return v
 		}
@@ -41,7 +41,7 @@ func mustHash(mapping map[string]uint32) func([]byte) uint32 {
 }
 
 func TestConsistentHash_GetNodeWraps(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0":  10,
 		"nodeB#0":  20,
 		"key-low":  5,
@@ -71,7 +71,7 @@ func TestConsistentHash_GetNodeWraps(t *testing.T) {
 }
 
 func TestConsistentHash_RemoveNodeUpdatesState(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"nodeA#1": 30,
 		"nodeB#0": 20,
@@ -132,7 +132,7 @@ func TestConsistentHash_EmptyState(t *testing.T) {
 }
 
 func TestConsistentHash_RebuildResetsRing(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"nodeA#1": 30,
 		"nodeB#0": 20,
@@ -174,7 +174,7 @@ func TestConsistentHash_RebuildResetsRing(t *testing.T) {
 }
 
 func TestConsistentHash_Rebuild(t *testing.T) {
-	mapping := map[string]uint32{
+	mapping := map[string]uint64{
 		"nodeA#0": 10,
 		"nodeA#1": 30,
 		"nodeB#0": 20,

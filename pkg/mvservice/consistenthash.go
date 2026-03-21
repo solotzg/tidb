@@ -15,9 +15,10 @@
 package mvservice
 
 import (
-	"hash/crc32"
 	"sort"
 	"strconv"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 // ConsistentHash is a consistent hashing ring.
@@ -25,14 +26,14 @@ import (
 type ConsistentHash struct {
 	ring     []virtualNode
 	data     map[string][]virtualNode
-	hashFunc func(data []byte) uint32
+	hashFunc func(data []byte) uint64
 	replicas int
 }
 
 type virtualNode *virtualNodeImpl
 
 type virtualNodeImpl struct {
-	hash uint32
+	hash uint64
 	node string
 }
 
@@ -42,7 +43,7 @@ func NewConsistentHash(replicas int) *ConsistentHash {
 	replicas = min(max(1, replicas), 200)
 	return &ConsistentHash{
 		data:     make(map[string][]virtualNode),
-		hashFunc: crc32.ChecksumIEEE,
+		hashFunc: xxhash.Sum64,
 		replicas: replicas,
 	}
 }

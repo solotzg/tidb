@@ -52,11 +52,11 @@ func newRunningMVServiceForTest(t *testing.T, helper Helper) *MVService {
 	return svc
 }
 
-func setHistoryGCOwnerForTest(svc *MVService, ownerHash uint32) {
+func setHistoryGCOwnerForTest(svc *MVService, ownerHash uint64) {
 	svc.nextHistoryGCAtMillis.Store(0)
 	svc.sch.mu.Lock()
 	svc.sch.ID = "nodeA"
-	svc.sch.chash.hashFunc = mustHash(map[string]uint32{
+	svc.sch.chash.hashFunc = mustHash(map[string]uint64{
 		"nodeA#0":           10,
 		"nodeB#0":           30,
 		mvHistoryGCOwnerKey: ownerHash,
