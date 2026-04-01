@@ -156,7 +156,7 @@ func (do *Domain) setMVServiceMViewRefreshHistRetention(retention time.Duration)
 	if do.GetMVService() == nil {
 		return
 	}
-	_ = do.mvService.SetMViewRefreshHistRetention(retention)
+	_ = do.mvService.SetMVRefreshHistRetention(retention)
 }
 
 func (do *Domain) setMVServiceMLogPurgeHistRetention(retention time.Duration) {

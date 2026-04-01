@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/binary"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pingcap/tidb/pkg/util/logutil"
@@ -47,8 +48,11 @@ type ServerConsistentHash struct {
 	servers map[string]serverInfo
 	chash   ConsistentHash // use consistent hash to reduce task movements after nodes changed
 	mu      sync.RWMutex
-	ID      string // current server ID
-	helper  ServerDiscovery
+	// serverCount is a fast-path snapshot for logging/metrics only.
+	// It must not be used as a strong-consistency source for ownership decisions.
+	serverCount atomic.Int32
+	ID          string // current server ID
+	helper      ServerDiscovery
 }
 
 // NewServerConsistentHash creates a server ownership helper backed by consistent hash.
@@ -109,6 +113,7 @@ func (sch *ServerConsistentHash) AddServer(srv serverInfo) {
 	defer sch.mu.Unlock()
 	sch.servers[srv.ID] = srv
 	sch.chash.AddNode(srv.ID)
+	sch.serverCount.Store(int32(len(sch.servers)))
 }
 
 // RemoveServer removes one server from the member map and hash ring.
@@ -117,6 +122,7 @@ func (sch *ServerConsistentHash) RemoveServer(srvID string) {
 	defer sch.mu.Unlock()
 	delete(sch.servers, srvID)
 	sch.chash.RemoveNode(srvID)
+	sch.serverCount.Store(int32(len(sch.servers)))
 }
 
 // refresh reloads server membership and rebuilds the hash ring when changed.
@@ -167,11 +173,18 @@ func (sch *ServerConsistentHash) refresh() (bool, error) {
 
 		sch.servers = newInfos
 		sch.chash.Rebuild(sch.servers)
+		sch.serverCount.Store(int32(len(sch.servers)))
 
 		sch.mu.Unlock() // Release guard after rebuild.
 	}
 
 	return true, nil
+}
+
+// ServerCount returns a lightweight membership count snapshot.
+// The value is best-effort and should be used for metrics/logging only.
+func (sch *ServerConsistentHash) ServerCount() int {
+	return int(sch.serverCount.Load())
 }
 
 // Available checks if the server responsible for key is available (i.e. matches current server ID).

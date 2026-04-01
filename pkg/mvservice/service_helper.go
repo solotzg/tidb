@@ -383,14 +383,14 @@ func purgeMVHistoryInBatches(ctx context.Context, sctx sessionctx.Context, sql s
 	}
 }
 
-// loadAllTiDBMVLogPurge loads all scheduled MV log purge tasks from metadata.
-func (*serviceHelper) loadAllTiDBMVLogPurge(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]*mvLog, error) {
+// loadAllTiDBMVLogPurge loads all scheduled MV log purge metadata.
+func (*serviceHelper) loadAllTiDBMVLogPurge(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]mvLogMeta, error) {
 	const sql = `SELECT TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) as NEXT_TIME_SEC, MLOG_ID FROM mysql.tidb_mlog_purge_info WHERE NEXT_TIME IS NOT NULL`
 	rows, err := execRCRestrictedSQLWithSessionPool(ctx, sysSessionPool, sql, nil)
 	if err != nil {
 		return nil, err
 	}
-	newPending := make(map[int64]*mvLog, len(rows))
+	newPending := make(map[int64]mvLogMeta, len(rows))
 	for _, row := range rows {
 		if row.IsNull(0) || row.IsNull(1) {
 			continue
@@ -400,18 +400,17 @@ func (*serviceHelper) loadAllTiDBMVLogPurge(ctx context.Context, sysSessionPool 
 			continue
 		}
 		nextPurge := mvsUnix(row.GetInt64(0), 0)
-		l := &mvLog{
+		l := mvLogMeta{
 			ID:        mvLogID,
 			nextPurge: nextPurge,
 		}
-		l.orderTs = l.nextPurge.UnixMilli()
 		newPending[mvLogID] = l
 	}
 	return newPending, nil
 }
 
-// loadAllTiDBMVRefresh loads all scheduled MV refresh tasks from metadata.
-func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]*mv, error) {
+// loadAllTiDBMVRefresh loads all scheduled MV refresh metadata.
+func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool basic.SessionPool) (map[int64]mvMeta, error) {
 	const sql = `SELECT TIMESTAMPDIFF(SECOND, '1970-01-01 00:00:00', NEXT_TIME) as NEXT_TIME_SEC, MVIEW_ID, LAST_SUCCESS_READ_TSO FROM mysql.tidb_mview_refresh_info WHERE NEXT_TIME IS NOT NULL`
 	se, err := sysSessionPool.Get()
 	if err != nil {
@@ -424,7 +423,7 @@ func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool b
 	if err != nil {
 		return nil, err
 	}
-	newPending := make(map[int64]*mv, len(rows))
+	newPending := make(map[int64]mvMeta, len(rows))
 	for _, row := range rows {
 		if row.IsNull(0) || row.IsNull(1) {
 			continue
@@ -443,7 +442,7 @@ func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool b
 				lastSuccessTime = mvsUnixMilli(oracle.ExtractPhysical(lastSuccessReadTSO))
 			}
 		}
-		m := &mv{
+		m := mvMeta{
 			ID:                 mvID,
 			nextRefresh:        nextRefresh,
 			lastSuccessReadTSO: lastSuccessReadTSO,
@@ -456,7 +455,6 @@ func (*serviceHelper) loadAllTiDBMVRefresh(ctx context.Context, sysSessionPool b
 			m.alertWarningSec = alertWarningSec
 			m.alertOverdueSec = alertOverdueSec
 		}
-		m.orderTs = m.nextRefresh.UnixMilli()
 		newPending[mvID] = m
 	}
 	return newPending, nil
@@ -516,7 +514,6 @@ func RegisterMVService(
 		Delay:        defaultTaskBackpressureDelay,
 	}
 	mvService := NewMVService(ctx, se, newServiceHelper(), cfg)
-	mvService.NotifyDDLChange() // always trigger a refresh after startup to make sure the in-memory state is up-to-date
 
 	// callback for DDL events only will be triggered on the DDL owner
 	// other nodes will get notified through the NotifyDDLChange method from the domain service registry

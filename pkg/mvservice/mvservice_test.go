@@ -568,7 +568,7 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		require.Equal(t, defaultMVHistoryGCRetention, mviewRefreshRetention)
 		require.Equal(t, defaultMVHistoryGCRetention, mlogPurgeRetention)
 
-		err := svc.SetMViewRefreshHistRetention(10 * 24 * time.Hour)
+		err := svc.SetMVRefreshHistRetention(10 * 24 * time.Hour)
 		require.NoError(t, err)
 		err = svc.SetMLogPurgeHistRetention(20 * 24 * time.Hour)
 		require.NoError(t, err)
@@ -578,14 +578,14 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		require.Equal(t, 10*24*time.Hour, mviewRefreshRetention)
 		require.Equal(t, 20*24*time.Hour, mlogPurgeRetention)
 
-		err = svc.SetMViewRefreshHistRetention(30 * time.Second)
+		err = svc.SetMVRefreshHistRetention(30 * time.Second)
 		require.NoError(t, err)
 		err = svc.SetMLogPurgeHistRetention(90 * time.Second)
 		require.NoError(t, err)
 		interval = svc.historyGCInterval()
 		require.Equal(t, time.Second, interval)
 
-		err = svc.SetMViewRefreshHistRetention(0)
+		err = svc.SetMVRefreshHistRetention(0)
 		require.Error(t, err)
 		err = svc.SetMLogPurgeHistRetention(0)
 		require.Error(t, err)
@@ -597,7 +597,7 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		now := mvsNow()
 
 		svc.nextHistoryGCAtMillis.Store(now.Add(10 * time.Minute).UnixMilli())
-		require.NoError(t, svc.SetMViewRefreshHistRetention(2*time.Minute))
+		require.NoError(t, svc.SetMVRefreshHistRetention(2*time.Minute))
 		require.NoError(t, svc.SetMLogPurgeHistRetention(2*time.Minute))
 
 		afterShrink := time.UnixMilli(svc.nextHistoryGCAtMillis.Load())
@@ -605,7 +605,7 @@ func TestMVServiceUpdateConfigs(t *testing.T) {
 		require.True(t, afterShrink.Sub(now) >= 0)
 
 		svc.nextHistoryGCAtMillis.Store(now.Add(5 * time.Second).UnixMilli())
-		require.NoError(t, svc.SetMViewRefreshHistRetention(12*time.Hour))
+		require.NoError(t, svc.SetMVRefreshHistRetention(12*time.Hour))
 		require.NoError(t, svc.SetMLogPurgeHistRetention(12*time.Hour))
 		afterGrow := time.UnixMilli(svc.nextHistoryGCAtMillis.Load())
 		require.Equal(t, now.Add(1200*time.Millisecond).UnixMilli(), afterGrow.UnixMilli())
@@ -635,29 +635,35 @@ func TestMVServiceCollectRefreshAlertTasksByAlertLevel(t *testing.T) {
 		svc.mvRefreshMu.pending = make(map[int64]mvItem)
 	}
 	warnTask := &mv{
-		ID:              101,
-		nextRefresh:     now.Add(-2 * time.Minute),
-		lastSuccessTime: now.Add(-40 * time.Second),
-		alertWarningSec: 30,
-		alertOverdueSec: 120,
+		mvMeta: mvMeta{
+			ID:              101,
+			nextRefresh:     now.Add(-2 * time.Minute),
+			lastSuccessTime: now.Add(-40 * time.Second),
+			alertWarningSec: 30,
+			alertOverdueSec: 120,
+		},
 	}
 	warnTask.orderTs = warnTask.nextRefresh.UnixMilli()
 	svc.mvRefreshMu.pending[warnTask.ID] = svc.mvRefreshMu.prio.Push(warnTask)
 
 	overdueTask := &mv{
-		ID:              102,
-		nextRefresh:     now.Add(-2 * time.Minute),
-		lastSuccessTime: now.Add(-70 * time.Second),
-		alertWarningSec: 30,
-		alertOverdueSec: 60,
+		mvMeta: mvMeta{
+			ID:              102,
+			nextRefresh:     now.Add(-2 * time.Minute),
+			lastSuccessTime: now.Add(-70 * time.Second),
+			alertWarningSec: 30,
+			alertOverdueSec: 60,
+		},
 	}
 	overdueTask.orderTs = maxNextScheduleTs // simulate running task
 	svc.mvRefreshMu.pending[overdueTask.ID] = svc.mvRefreshMu.prio.Push(overdueTask)
 
 	disabledTask := &mv{
-		ID:              103,
-		nextRefresh:     now.Add(-2 * time.Minute),
-		lastSuccessTime: now.Add(-5 * time.Minute),
+		mvMeta: mvMeta{
+			ID:              103,
+			nextRefresh:     now.Add(-2 * time.Minute),
+			lastSuccessTime: now.Add(-5 * time.Minute),
+		},
 	}
 	disabledTask.orderTs = disabledTask.nextRefresh.UnixMilli()
 	svc.mvRefreshMu.pending[disabledTask.ID] = svc.mvRefreshMu.prio.Push(disabledTask)
@@ -693,10 +699,12 @@ func TestMVServiceRefreshAlertScanInterval(t *testing.T) {
 		svc.mvRefreshMu.pending = make(map[int64]mvItem)
 	}
 	task := &mv{
-		ID:              1,
-		nextRefresh:     now.Add(-2 * time.Minute),
-		lastSuccessTime: now.Add(-2 * time.Minute),
-		alertWarningSec: 30,
+		mvMeta: mvMeta{
+			ID:              1,
+			nextRefresh:     now.Add(-2 * time.Minute),
+			lastSuccessTime: now.Add(-2 * time.Minute),
+			alertWarningSec: 30,
+		},
 	}
 	task.orderTs = task.nextRefresh.UnixMilli()
 	svc.mvRefreshMu.pending[task.ID] = svc.mvRefreshMu.prio.Push(task)
@@ -736,11 +744,13 @@ func TestMVServiceCollectRefreshAlertTasksDedupByLastSuccessReadTSO(t *testing.T
 		{
 			name: "dedup_on_same_tso",
 			task: &mv{
-				ID:                 201,
-				nextRefresh:        now.Add(-2 * time.Minute),
-				lastSuccessReadTSO: 123456,
-				lastSuccessTime:    now.Add(-2 * time.Minute),
-				alertWarningSec:    30,
+				mvMeta: mvMeta{
+					ID:                 201,
+					nextRefresh:        now.Add(-2 * time.Minute),
+					lastSuccessReadTSO: 123456,
+					lastSuccessTime:    now.Add(-2 * time.Minute),
+					alertWarningSec:    30,
+				},
 			},
 			steps: []step{
 				{atOffset: 0, expectedCount: 1, expectedID: 201, expectedOverdue: false, warningCount: 1, overdueCount: 0},
@@ -758,12 +768,14 @@ func TestMVServiceCollectRefreshAlertTasksDedupByLastSuccessReadTSO(t *testing.T
 		{
 			name: "dedup_by_alert_level",
 			task: &mv{
-				ID:                 202,
-				nextRefresh:        now.Add(-2 * time.Minute),
-				lastSuccessReadTSO: 123456,
-				lastSuccessTime:    now.Add(-40 * time.Second),
-				alertWarningSec:    30,
-				alertOverdueSec:    60,
+				mvMeta: mvMeta{
+					ID:                 202,
+					nextRefresh:        now.Add(-2 * time.Minute),
+					lastSuccessReadTSO: 123456,
+					lastSuccessTime:    now.Add(-40 * time.Second),
+					alertWarningSec:    30,
+					alertOverdueSec:    60,
+				},
 			},
 			steps: []step{
 				{atOffset: 0, expectedCount: 1, expectedID: 202, expectedOverdue: false, warningCount: 1, overdueCount: 0},
@@ -906,7 +918,7 @@ func (h *fullChainMVServiceHelper) setPending(logs map[int64]time.Time, mvs map[
 	}
 }
 
-func (h *fullChainMVServiceHelper) loadAllTiDBMVLogPurge(context.Context, basic.SessionPool) (map[int64]*mvLog, error) {
+func (h *fullChainMVServiceHelper) loadAllTiDBMVLogPurge(context.Context, basic.SessionPool) (map[int64]mvLogMeta, error) {
 	h.fetchLogsCalls.Add(1)
 	if h.fetchLogsErr != nil {
 		return nil, h.fetchLogsErr
@@ -914,19 +926,17 @@ func (h *fullChainMVServiceHelper) loadAllTiDBMVLogPurge(context.Context, basic.
 
 	h.pendingMu.RLock()
 	defer h.pendingMu.RUnlock()
-	ret := make(map[int64]*mvLog, len(h.pendingLogs))
+	ret := make(map[int64]mvLogMeta, len(h.pendingLogs))
 	for id, next := range h.pendingLogs {
-		logTask := &mvLog{
+		ret[id] = mvLogMeta{
 			ID:        id,
 			nextPurge: next,
 		}
-		logTask.orderTs = next.UnixMilli()
-		ret[id] = logTask
 	}
 	return ret, nil
 }
 
-func (h *fullChainMVServiceHelper) loadAllTiDBMVRefresh(context.Context, basic.SessionPool) (map[int64]*mv, error) {
+func (h *fullChainMVServiceHelper) loadAllTiDBMVRefresh(context.Context, basic.SessionPool) (map[int64]mvMeta, error) {
 	h.fetchViewCalls.Add(1)
 	if h.fetchViewsErr != nil {
 		return nil, h.fetchViewsErr
@@ -934,14 +944,12 @@ func (h *fullChainMVServiceHelper) loadAllTiDBMVRefresh(context.Context, basic.S
 
 	h.pendingMu.RLock()
 	defer h.pendingMu.RUnlock()
-	ret := make(map[int64]*mv, len(h.pendingMVs))
+	ret := make(map[int64]mvMeta, len(h.pendingMVs))
 	for id, next := range h.pendingMVs {
-		mvTask := &mv{
+		ret[id] = mvMeta{
 			ID:          id,
 			nextRefresh: next,
 		}
-		mvTask.orderTs = next.UnixMilli()
-		ret[id] = mvTask
 	}
 	return ret, nil
 }

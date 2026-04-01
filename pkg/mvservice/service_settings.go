@@ -124,7 +124,7 @@ func NewMVService(ctx context.Context, se basic.SessionPool, helper Helper, cfg 
 		panic(fmt.Sprintf("invalid MV service fetch interval config: fetch_interval=%s err=%v",
 			cfg.FetchInterval, err))
 	}
-	if err := mgr.SetMViewRefreshHistRetention(cfg.MViewRefreshHistRetention); err != nil {
+	if err := mgr.SetMVRefreshHistRetention(cfg.MViewRefreshHistRetention); err != nil {
 		panic(fmt.Sprintf("invalid MV service mview refresh history retention config: retention=%s err=%v",
 			cfg.MViewRefreshHistRetention, err))
 	}
@@ -257,8 +257,8 @@ func (t *MVService) historyGCInterval() time.Duration {
 	return deriveHistoryGCInterval(mviewRefreshRetention, mlogPurgeRetention)
 }
 
-// SetMViewRefreshHistRetention sets retention for mysql.tidb_mview_refresh_hist.
-func (t *MVService) SetMViewRefreshHistRetention(mviewRefreshRetention time.Duration) error {
+// SetMVRefreshHistRetention sets retention for mysql.tidb_mview_refresh_hist.
+func (t *MVService) SetMVRefreshHistRetention(mviewRefreshRetention time.Duration) error {
 	if t == nil {
 		return fmt.Errorf("mv service is nil")
 	}

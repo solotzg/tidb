@@ -85,6 +85,13 @@ func assertRingNodeCount(t *testing.T, sch *ServerConsistentHash, expected int) 
 	}
 }
 
+func assertServerCount(t *testing.T, sch *ServerConsistentHash, expected int) {
+	t.Helper()
+	if got := sch.ServerCount(); got != expected {
+		t.Fatalf("expected server count %d, got %d", expected, got)
+	}
+}
+
 func assertRingOwner(t *testing.T, sch *ServerConsistentHash, key []byte, expectedOwner string) {
 	t.Helper()
 	if got := sch.chash.GetNode(key); got != expectedOwner {
@@ -113,6 +120,7 @@ func TestServerConsistentHashAddRemoveAndAvailable(t *testing.T) {
 	if len(sch.servers) != 2 {
 		t.Fatalf("expected 2 servers, got %d", len(sch.servers))
 	}
+	assertServerCount(t, sch, 2)
 	assertRingNodeCount(t, sch, 2)
 	assertRingOwner(t, sch, []byte("key-low"), "nodeA")
 	assertRingOwner(t, sch, []byte("key-mid"), "nodeB")
@@ -124,6 +132,7 @@ func TestServerConsistentHashAddRemoveAndAvailable(t *testing.T) {
 	if len(sch.servers) != 1 {
 		t.Fatalf("expected 1 server after remove, got %d", len(sch.servers))
 	}
+	assertServerCount(t, sch, 1)
 	assertRingNodeCount(t, sch, 1)
 	assertRingOwner(t, sch, []byte("key-mid"), "nodeA")
 	assertAvailableForNode(t, sch, "nodeB", "key-mid", false)
@@ -219,6 +228,7 @@ func TestServerConsistentHashFetchAppliesFilter(t *testing.T) {
 	if len(sch.servers) != 1 {
 		t.Fatalf("expected 1 server after filter, got %d", len(sch.servers))
 	}
+	assertServerCount(t, sch, 1)
 	if _, ok := sch.servers["nodeA"]; !ok {
 		t.Fatalf("expected nodeA kept by filter")
 	}
@@ -246,6 +256,7 @@ func TestServerConsistentHashFetchNoChange(t *testing.T) {
 	if !changed {
 		t.Fatalf("expected changed=true in first refresh")
 	}
+	assertServerCount(t, sch, 1)
 	beforeNodeCount := sch.chash.NodeCount()
 	beforeRingSize := len(sch.chash.ring)
 
@@ -256,6 +267,7 @@ func TestServerConsistentHashFetchNoChange(t *testing.T) {
 	if changed {
 		t.Fatalf("expected changed=false in second refresh")
 	}
+	assertServerCount(t, sch, 1)
 	if got := sch.chash.NodeCount(); got != beforeNodeCount {
 		t.Fatalf("expected node count %d, got %d", beforeNodeCount, got)
 	}
@@ -335,4 +347,5 @@ func TestServerConsistentHashFetchError(t *testing.T) {
 	if changed {
 		t.Fatalf("expected changed=false on fetch error")
 	}
+	assertServerCount(t, sch, 0)
 }

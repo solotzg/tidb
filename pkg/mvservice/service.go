@@ -17,6 +17,7 @@ package mvservice
 import (
 	"context"
 	"fmt"
+	"maps"
 	"runtime/debug"
 	"strconv"
 	"sync"
@@ -93,13 +94,18 @@ type MVService struct {
 		pending map[int64]mvLogItem
 		prio    PriorityQueue[*mvLog]
 	}
+	allMetaMu struct {
+		sync.RWMutex
+		mvRefresh  map[int64]mvMeta
+		mvLogPurge map[int64]mvLogMeta
+	}
 }
 
 const (
 	defaultMVTaskTimeout         = 5 * time.Minute
 	defaultMVFetchInterval       = 30 * time.Second
 	defaultMVBasicInterval       = time.Second
-	defaultServerRefreshInterval = 5 * time.Second
+	defaultServerRefreshInterval = 10 * time.Second
 	defaultMVHistoryGCInterval   = time.Hour
 	defaultMVHistoryGCRetention  = 365 * 24 * time.Hour
 	defaultMVTaskRetryBase       = 10 * time.Second
@@ -133,7 +139,7 @@ const (
 	historyGCRetryMaxAttempts = 8
 )
 
-type mv struct {
+type mvMeta struct {
 	ID          int64
 	nextRefresh time.Time
 	schemaName  string
@@ -143,21 +149,35 @@ type mv struct {
 	lastSuccessTime    time.Time
 	alertWarningSec    int64
 	alertOverdueSec    int64
+}
+
+type mvRuntime struct {
 	// Suppress repeated overdue logs for the same lastSuccessReadTSO.
 	lastLoggedWarningTSO uint64
 	lastLoggedOverdueTSO uint64
+	orderTs              int64 // unix timestamp in milliseconds
+	retryCount           atomic.Int64
+}
 
+type mv struct {
+	mvMeta
+	mvRuntime
+}
+
+type mvLogMeta struct {
+	ID        int64
+	nextPurge time.Time
+}
+
+// mvLog tracks scheduling state for one MV log purge task.
+type mvLogRuntime struct {
 	orderTs    int64 // unix timestamp in milliseconds
 	retryCount atomic.Int64
 }
 
-// mvLog tracks scheduling state for one MV log purge task.
 type mvLog struct {
-	ID        int64
-	nextPurge time.Time
-
-	orderTs    int64 // unix timestamp in milliseconds
-	retryCount atomic.Int64
+	mvLogMeta
+	mvLogRuntime
 }
 
 // TaskBackpressureConfig is the runtime config for task backpressure.
@@ -175,8 +195,8 @@ func (m *mvLog) Less(other *mvLog) bool {
 	return m.orderTs < other.orderTs
 }
 
-// fetchExecTasks collects due tasks from both queues and marks them as running.
-func (t *MVService) fetchExecTasks(now time.Time) (mvLogToPurge []*mvLog, mvToRefresh []*mv) {
+// popDueTasks collects due tasks from both queues and marks them as running.
+func (t *MVService) popDueTasks(now time.Time) (mvLogToPurge []*mvLog, mvToRefresh []*mv) {
 	nowTs := now.UnixMilli()
 	{
 		t.mvLogPurgeMu.Lock() // guard mvlog purge queue
@@ -474,6 +494,7 @@ func (t *MVService) handleRefreshTaskResult(m *mv, nextRefresh time.Time, err er
 	if nextRefresh.IsZero() {
 		m.retryCount.Store(0)
 		t.removeMVTask(m)
+		t.removeRefreshMetaFromAllMeta(m.ID)
 		return
 	}
 	m.retryCount.Store(0)
@@ -500,6 +521,7 @@ func (t *MVService) handlePurgeTaskResult(l *mvLog, nextPurge time.Time, err err
 	if nextPurge.IsZero() {
 		l.retryCount.Store(0)
 		t.removeMVLogTask(l)
+		t.removePurgeMetaFromAllMeta(l.ID)
 		return
 	}
 	l.retryCount.Store(0)
@@ -541,14 +563,19 @@ func (t *MVService) rescheduleMV(m *mv, next int64) {
 // rescheduleMVSuccess applies the next refresh time from a successful execution.
 func (t *MVService) rescheduleMVSuccess(m *mv, nextRefresh time.Time) {
 	orderTs := nextRefresh.UnixMilli()
+	updated := false
 
 	t.mvRefreshMu.Lock() // guard mv refresh queue
 	if it, ok := t.mvRefreshMu.pending[m.ID]; ok && it.Value == m {
 		m.nextRefresh = nextRefresh
 		m.orderTs = orderTs
 		t.mvRefreshMu.prio.Update(it, m)
+		updated = true
 	}
 	t.mvRefreshMu.Unlock() // release mv refresh queue guard
+	if updated {
+		t.updateRefreshNextInAllMeta(m.ID, nextRefresh)
+	}
 }
 
 // rescheduleMVLog reschedules a purge task using a millisecond unix timestamp.
@@ -564,23 +591,68 @@ func (t *MVService) rescheduleMVLog(l *mvLog, next int64) {
 // rescheduleMVLogSuccess applies the next purge time from a successful execution.
 func (t *MVService) rescheduleMVLogSuccess(l *mvLog, nextPurge time.Time) {
 	orderTs := nextPurge.UnixMilli()
+	updated := false
 
 	t.mvLogPurgeMu.Lock() // guard mvlog purge queue
 	if it, ok := t.mvLogPurgeMu.pending[l.ID]; ok && it.Value == l {
 		l.nextPurge = nextPurge
 		l.orderTs = orderTs
 		t.mvLogPurgeMu.prio.Update(it, l)
+		updated = true
 	}
 	t.mvLogPurgeMu.Unlock() // release mvlog purge queue guard
+	if updated {
+		t.updatePurgeNextInAllMeta(l.ID, nextPurge)
+	}
 }
 
-// buildMVLogPurgeTasks rebuilds purge task states from fetched metadata.
+func (t *MVService) updateRefreshNextInAllMeta(id int64, nextRefresh time.Time) {
+	t.allMetaMu.Lock()
+	if t.allMetaMu.mvRefresh != nil {
+		if m, ok := t.allMetaMu.mvRefresh[id]; ok {
+			m.nextRefresh = nextRefresh
+			t.allMetaMu.mvRefresh[id] = m
+		}
+	}
+	t.allMetaMu.Unlock()
+}
+
+func (t *MVService) updatePurgeNextInAllMeta(id int64, nextPurge time.Time) {
+	t.allMetaMu.Lock()
+	if t.allMetaMu.mvLogPurge != nil {
+		if l, ok := t.allMetaMu.mvLogPurge[id]; ok {
+			l.nextPurge = nextPurge
+			t.allMetaMu.mvLogPurge[id] = l
+		}
+	}
+	t.allMetaMu.Unlock()
+}
+
+// removeRefreshMetaFromAllMeta removes one refresh meta entry from full-meta cache.
+func (t *MVService) removeRefreshMetaFromAllMeta(id int64) {
+	t.allMetaMu.Lock()
+	if t.allMetaMu.mvRefresh != nil {
+		delete(t.allMetaMu.mvRefresh, id)
+	}
+	t.allMetaMu.Unlock()
+}
+
+// removePurgeMetaFromAllMeta removes one purge meta entry from full-meta cache.
+func (t *MVService) removePurgeMetaFromAllMeta(id int64) {
+	t.allMetaMu.Lock()
+	if t.allMetaMu.mvLogPurge != nil {
+		delete(t.allMetaMu.mvLogPurge, id)
+	}
+	t.allMetaMu.Unlock()
+}
+
+// syncMVLogPurgeQueue rebuilds purge task states from fetched metadata.
 //
 // For each item in newPending:
 // 1. Update mutable metadata fields (nextPurge).
 // 2. If nextPurge changed and the task is not currently running, update orderTs and heap position.
 // 3. If the task is currently running (orderTs == maxNextScheduleTs), defer heap adjustment until task completion.
-func (t *MVService) buildMVLogPurgeTasks(newPending map[int64]*mvLog) {
+func (t *MVService) syncMVLogPurgeQueue(newPending map[int64]*mvLog) {
 	t.mvLogPurgeMu.Lock()         // guard mvlog purge queue
 	defer t.mvLogPurgeMu.Unlock() // release mvlog purge queue guard
 
@@ -590,7 +662,7 @@ func (t *MVService) buildMVLogPurgeTasks(newPending map[int64]*mvLog) {
 	for id, nl := range newPending {
 		if ol, ok := t.mvLogPurgeMu.pending[id]; ok {
 			changed := ol.Value.nextPurge != nl.nextPurge
-			ol.Value.nextPurge = nl.nextPurge
+			ol.Value.mvLogMeta = nl.mvLogMeta
 			if ol.Value.orderTs != maxNextScheduleTs { // not running
 				if changed {
 					ol.Value.orderTs = ol.Value.nextPurge.UnixMilli()
@@ -612,8 +684,8 @@ func (t *MVService) buildMVLogPurgeTasks(newPending map[int64]*mvLog) {
 	t.metrics.mvLogCount.Store(int64(len(t.mvLogPurgeMu.pending)))
 }
 
-// buildMVRefreshTasks rebuilds refresh task states from fetched metadata.
-func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
+// syncMVRefreshQueue rebuilds refresh task states from fetched metadata.
+func (t *MVService) syncMVRefreshQueue(newPending map[int64]*mv) {
 	t.mvRefreshMu.Lock()         // guard mv refresh queue
 	defer t.mvRefreshMu.Unlock() // release mv refresh queue guard
 
@@ -622,14 +694,8 @@ func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
 	}
 	for id, nm := range newPending {
 		if om, ok := t.mvRefreshMu.pending[id]; ok {
-			om.Value.schemaName = nm.schemaName
-			om.Value.mviewName = nm.mviewName
-			om.Value.lastSuccessReadTSO = nm.lastSuccessReadTSO
-			om.Value.lastSuccessTime = nm.lastSuccessTime
-			om.Value.alertWarningSec = nm.alertWarningSec
-			om.Value.alertOverdueSec = nm.alertOverdueSec
 			changed := om.Value.nextRefresh != nm.nextRefresh
-			om.Value.nextRefresh = nm.nextRefresh
+			om.Value.mvMeta = nm.mvMeta
 			if om.Value.orderTs != maxNextScheduleTs { // not running
 				if changed {
 					om.Value.orderTs = om.Value.nextRefresh.UnixMilli()
@@ -651,74 +717,143 @@ func (t *MVService) buildMVRefreshTasks(newPending map[int64]*mv) {
 	t.metrics.mvCount.Store(int64(len(t.mvRefreshMu.pending)))
 }
 
-// filterUnownedTasks removes tasks that are not owned by this server.
-// It checks all IDs under one hash-ring read lock to reduce lock contention.
-func filterUnownedTasks[T any](sch *ServerConsistentHash, newPending map[int64]T) {
-	if len(newPending) == 0 {
-		return
-	}
-	sch.mu.RLock()
-	for id := range newPending {
-		if sch.chash.GetNode(int64KeyToBinaryBytes(id)) != sch.ID {
-			delete(newPending, id)
+func materializeMVLogPurgeTasks(meta []mvLogMeta) map[int64]*mvLog {
+	newPending := make(map[int64]*mvLog, len(meta))
+	for _, m := range meta {
+		newPending[m.ID] = &mvLog{
+			mvLogMeta: m,
+			mvLogRuntime: mvLogRuntime{
+				orderTs: m.nextPurge.UnixMilli(),
+			},
 		}
 	}
-	sch.mu.RUnlock()
+	return newPending
 }
 
-// fetchAllTiDBMVLogPurge fetches purge metadata and filters out tasks not owned by this node.
-func (t *MVService) fetchAllTiDBMVLogPurge() (map[int64]*mvLog, error) {
+func materializeMVRefreshTasks(meta []mvMeta) map[int64]*mv {
+	newPending := make(map[int64]*mv, len(meta))
+	for _, m := range meta {
+		newPending[m.ID] = &mv{
+			mvMeta: m,
+			mvRuntime: mvRuntime{
+				orderTs: m.nextRefresh.UnixMilli(),
+			},
+		}
+	}
+	return newPending
+}
+
+func (t *MVService) replaceAllMetaIfChanged(mvRefresh map[int64]mvMeta, mvLogPurge map[int64]mvLogMeta) bool {
+	changed := false
+	t.allMetaMu.RLock()
+	if t.allMetaMu.mvRefresh == nil || !maps.Equal(t.allMetaMu.mvRefresh, mvRefresh) {
+		t.allMetaMu.RUnlock()
+
+		changed = true
+
+		t.allMetaMu.Lock()
+		t.allMetaMu.mvRefresh = mvRefresh
+		t.allMetaMu.Unlock()
+	} else {
+		t.allMetaMu.RUnlock()
+	}
+
+	t.allMetaMu.RLock()
+	if t.allMetaMu.mvLogPurge == nil || !maps.Equal(t.allMetaMu.mvLogPurge, mvLogPurge) {
+		t.allMetaMu.RUnlock()
+
+		changed = true
+
+		t.allMetaMu.Lock()
+		t.allMetaMu.mvLogPurge = mvLogPurge
+		t.allMetaMu.Unlock()
+	} else {
+		t.allMetaMu.RUnlock()
+	}
+
+	return changed
+}
+
+// rebuildOwnedTasksFromAllMeta rebuilds local queues from all metadata.
+func (t *MVService) rebuildOwnedTasksFromAllMeta() {
+	t.allMetaMu.RLock()
+	if t.allMetaMu.mvRefresh == nil || t.allMetaMu.mvLogPurge == nil {
+		t.allMetaMu.RUnlock()
+		return
+	}
+
+	approxServerCount := max(1, t.sch.ServerCount())
+	ownedMVRefreshMeta := make([]mvMeta, 0, len(t.allMetaMu.mvRefresh)/approxServerCount)
+	ownedMVLogPurgeMeta := make([]mvLogMeta, 0, len(t.allMetaMu.mvLogPurge)/approxServerCount)
+
+	t.sch.mu.RLock()
+	for id, m := range t.allMetaMu.mvRefresh {
+		if t.sch.chash.GetNode(int64KeyToBinaryBytes(id)) == t.sch.ID {
+			ownedMVRefreshMeta = append(ownedMVRefreshMeta, m)
+		}
+	}
+	for id, m := range t.allMetaMu.mvLogPurge {
+		if t.sch.chash.GetNode(int64KeyToBinaryBytes(id)) == t.sch.ID {
+			ownedMVLogPurgeMeta = append(ownedMVLogPurgeMeta, m)
+		}
+	}
+	t.sch.mu.RUnlock()
+	t.allMetaMu.RUnlock()
+
+	t.syncMVRefreshQueue(materializeMVRefreshTasks(ownedMVRefreshMeta))
+	t.syncMVLogPurgeQueue(materializeMVLogPurgeTasks(ownedMVLogPurgeMeta))
+}
+
+// fetchAllTiDBMVLogPurge fetches full purge metadata.
+func (t *MVService) fetchAllTiDBMVLogPurge() (map[int64]mvLogMeta, error) {
 	start := mvsNow()
 	result := mvDurationResultSuccess
 	defer func() {
 		t.mh.observeTaskDuration(mvFetchTypeMLogPurge, result, mvsSince(start))
 	}()
 
-	newPending, err := t.mh.loadAllTiDBMVLogPurge(t.ctx, t.sysSessionPool)
+	metaPending, err := t.mh.loadAllTiDBMVLogPurge(t.ctx, t.sysSessionPool)
 	if err != nil {
 		result = mvDurationResultFailed
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("fetch all mvlog purge tasks failed", fields...)
 		return nil, err
 	}
-	filterUnownedTasks(t.sch, newPending)
-	return newPending, nil
+	return metaPending, nil
 }
 
-// fetchAllTiDBMVRefresh fetches refresh metadata and filters out tasks not owned by this node.
-func (t *MVService) fetchAllTiDBMVRefresh() (map[int64]*mv, error) {
+// fetchAllTiDBMVRefresh fetches full refresh metadata.
+func (t *MVService) fetchAllTiDBMVRefresh() (map[int64]mvMeta, error) {
 	start := mvsNow()
 	result := mvDurationResultSuccess
 	defer func() {
 		t.mh.observeTaskDuration(mvFetchTypeMViewRefresh, result, mvsSince(start))
 	}()
 
-	newPending, err := t.mh.loadAllTiDBMVRefresh(t.ctx, t.sysSessionPool)
+	metaPending, err := t.mh.loadAllTiDBMVRefresh(t.ctx, t.sysSessionPool)
 	if err != nil {
 		result = mvDurationResultFailed
 		fields := append(t.runtimeLogFields(), zap.Error(err))
 		logutil.BgLogger().Warn("fetch all materialized view refresh tasks failed", fields...)
 		return nil, err
 	}
-	filterUnownedTasks(t.sch, newPending)
-	return newPending, nil
+	return metaPending, nil
 }
 
-// fetchAllMVMeta refreshes both purge and refresh task queues from metadata tables.
-func (t *MVService) fetchAllMVMeta() error {
-	newMLogPending, err := t.fetchAllTiDBMVLogPurge()
+// fetchAllMVMeta refreshes full metadata and returns whether metadata changed.
+func (t *MVService) fetchAllMVMeta() (bool, error) {
+	allMLogMeta, err := t.fetchAllTiDBMVLogPurge()
 	if err != nil {
-		return fmt.Errorf("fetch mvlog purge metadata failed: %w", err)
+		return false, fmt.Errorf("fetch mvlog purge metadata failed: %w", err)
 	}
-	newMViewPending, err := t.fetchAllTiDBMVRefresh()
+	allMViewMeta, err := t.fetchAllTiDBMVRefresh()
 	if err != nil {
-		return fmt.Errorf("fetch mview refresh metadata failed: %w", err)
+		return false, fmt.Errorf("fetch mview refresh metadata failed: %w", err)
 	}
-	t.buildMVLogPurgeTasks(newMLogPending)
-	t.buildMVRefreshTasks(newMViewPending)
+	metaChanged := t.replaceAllMetaIfChanged(allMViewMeta, allMLogMeta)
 
 	t.lastMetaFetchMillis.Store(mvsNow().UnixMilli())
-	return nil
+	return metaChanged, nil
 }
 
 // resetTimer safely resets timer to delay, draining the channel when needed.
@@ -753,6 +888,30 @@ func (t *MVService) maybeGCOperationHistory(now time.Time) {
 		return
 	}
 	go t.runGCOperationHistory(now, historyGCInterval)
+}
+
+// refreshServersIfDue refreshes server membership on schedule and reports whether
+// a post-bootstrap membership change is observed.
+func (t *MVService) refreshServersIfDue(now time.Time, lastSrvRefresh *time.Time) bool {
+	if now.Sub(*lastSrvRefresh) < t.serverRefreshInterval {
+		return false
+	}
+	isBootstrap := lastSrvRefresh.IsZero()
+
+	changed, err := t.sch.refresh()
+	*lastSrvRefresh = now
+	if err != nil {
+		t.mh.observeRunEvent(mvRunEventServerRefreshError)
+		fields := append(t.runtimeLogFields(), zap.Error(err))
+		logutil.BgLogger().Warn("refresh all TiDB server info failed", fields...)
+		return false
+	}
+
+	serverChanged := !isBootstrap && changed
+	if serverChanged {
+		t.mh.observeRunEvent(mvRunEventServerChanged)
+	}
+	return serverChanged
 }
 
 func (t *MVService) runGCOperationHistory(now time.Time, historyGCInterval time.Duration) {
@@ -883,7 +1042,10 @@ func (t *MVService) Run() {
 	}()
 
 	lastSrvRefresh := time.Time{}
-	sawInitialServerRefresh := false
+	// Bootstrap one server refresh before entering the main loop.
+	t.refreshServersIfDue(mvsNow(), &lastSrvRefresh)
+	// Trigger one startup metadata fetch from inside Run.
+	t.NotifyDDLChange()
 	for {
 		ddlDirty := false
 		maintenanceTick := false
@@ -899,32 +1061,19 @@ func (t *MVService) Run() {
 		}
 
 		now := mvsNow()
+		serverChanged := false
 		if maintenanceTick {
 			t.mh.reportMetrics(t)
 			t.maybeGCOperationHistory(now)
 			t.maybeLogRefreshAlertTasks(now)
+			serverChanged = t.refreshServersIfDue(now, &lastSrvRefresh)
 			resetTimer(maintenanceTimer, t.basicInterval)
 		}
 
-		serverChanged := false
-		if now.Sub(lastSrvRefresh) >= t.serverRefreshInterval {
-			changed, err := t.sch.refresh()
-			if err != nil {
-				t.mh.observeRunEvent(mvRunEventServerRefreshError)
-				fields := append(t.runtimeLogFields(), zap.Error(err))
-				logutil.BgLogger().Warn("refresh all TiDB server info failed", fields...)
-			} else {
-				if sawInitialServerRefresh && changed {
-					serverChanged = true
-					t.mh.observeRunEvent(mvRunEventServerChanged)
-				}
-				sawInitialServerRefresh = true
-			}
-			lastSrvRefresh = now
-		}
-
 		needFetch := t.shouldFetchMVMeta(now)
-		if ddlDirty || serverChanged || needFetch {
+		needRebuild := serverChanged
+		if ddlDirty || needFetch {
+			var err error
 			if ddlDirty {
 				t.mh.observeRunEvent(mvRunEventFetchByDDL)
 			}
@@ -932,7 +1081,10 @@ func (t *MVService) Run() {
 				t.mh.observeRunEvent(mvRunEventFetchByInterval)
 			}
 			// Fetch metadata on demand; errors are throttled via lastMetaFetchMillis update below.
-			if err := t.fetchAllMVMeta(); err != nil {
+			metaChanged := false
+			metaChanged, err = t.fetchAllMVMeta()
+			needRebuild = needRebuild || metaChanged
+			if err != nil {
 				fields := append(t.runtimeLogFields(),
 					zap.Bool("ddl_dirty", ddlDirty),
 					zap.Bool("server_changed", serverChanged),
@@ -946,10 +1098,15 @@ func (t *MVService) Run() {
 				t.markFetchFailure(now, ddlDirty || serverChanged)
 			}
 		}
-
-		mvLogToPurge, mvToRefresh := t.fetchExecTasks(now)
-		t.purgeMVLog(mvLogToPurge)
-		t.refreshMV(mvToRefresh)
+		if needRebuild {
+			// Rebuild ownership once per loop when topology changed or metadata changed.
+			t.rebuildOwnedTasksFromAllMeta()
+		}
+		{
+			mvLogToPurge, mvToRefresh := t.popDueTasks(now)
+			t.purgeMVLog(mvLogToPurge)
+			t.refreshMV(mvToRefresh)
+		}
 
 		next := t.nextScheduleTime(now)
 		resetTimer(timer, mvsUntil(next))
