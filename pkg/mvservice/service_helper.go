@@ -29,6 +29,7 @@ import (
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	basic "github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	disttaskutil "github.com/pingcap/tidb/pkg/util/disttask"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/sqlexec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -104,20 +105,22 @@ func (*serviceHelper) getServerInfo() (serverInfo, error) {
 	if err != nil {
 		return serverInfo{}, err
 	}
+	serverID := disttaskutil.GenerateExecID(localSrv)
 	return serverInfo{
-		ID: localSrv.ID,
+		ID: serverID,
 	}, nil
 }
 
 func (*serviceHelper) getAllServerInfo(ctx context.Context) (map[string]serverInfo, error) {
-	servers := make(map[string]serverInfo)
 	allServers, err := infosync.GetAllServerInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
+	servers := make(map[string]serverInfo, len(allServers))
 	for _, srv := range allServers {
-		servers[srv.ID] = serverInfo{
-			ID: srv.ID,
+		serverID := disttaskutil.GenerateExecID(srv)
+		servers[serverID] = serverInfo{
+			ID: serverID,
 		}
 	}
 	return servers, nil
