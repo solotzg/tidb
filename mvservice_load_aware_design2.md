@@ -49,7 +49,7 @@
 1. 在不新增系统表、不改变任务语义前提下实现跨节点负载再平衡。
 2. 提供明确、可操作、可观测的全局控制面。
 3. 权重异常、链路失败可自动回退到等权一致性哈希。
-4. 保持混部与滚动升级可用性。
+4. 保持混部与滚动升级阶段在 `rebalance=OFF` 时可安全运行。
 
 ## 3. 非目标
 
@@ -250,6 +250,7 @@ type MVCoordination interface {
 
 - 只依赖 `NodeLoadWriter`
 - 周期写本机 `node_load`
+- 随 MVService 生命周期常驻启动，不受 `tidb_mview_rebalance_enabled` 或 `cluster ready` gate 影响；否则系统在冷启动或 `OFF -> ON` 切换时可能无法形成 fresh `node_load` 集合。
 
 3. `WeightManager`
 
@@ -489,7 +490,7 @@ type MVCoordination interface {
 
 1. 自动调权需要有明确的启停与回退控制面。
 2. 推荐控制面统一抽象为 `RebalanceControl.Enabled`，由 Domain 侧实现并通过 `MVCoordination.LoadRebalanceControl` 暴露给 `WeightManager`。
-3. 默认值建议为 `Enabled=false`，先灰度开启，再逐步扩大范围。
+3. 默认值建议为 `Enabled=false`，先在测试或灰度集群整体开启，再逐步扩大到更多集群。
 4. 最终控制面采用全局 sysvar 实现；它天然是集群级别，不支持按节点灰度。
 5. 发布策略只能按环境或集群维度推进，不能在同一集群内做节点级灰度。
 6. 混部阶段必须保持 `tidb_mview_rebalance_enabled=OFF`；只有所有 TiDB 节点都升级到支持 V2 的版本后，才允许开启该功能。
@@ -583,9 +584,10 @@ type MVCoordination interface {
 - `exec_waiting`、`mv_refresh_warning`、`mv_refresh_overdue` 收敛
 - ring 重建频率
 - metadata fetch 频率
+
 3. 需要明确一个运行语义：任一 live TiDB 节点缺少 fresh `node_load/<exec_id>` 时，系统会将集群视为 not ready，并整体回退到等权模式；这是预期保护行为，不应按故障误判。
 
-3. 回退策略：
+4. 回退策略：
 
 - 通过控制面将 `RebalanceControl.Enabled` 置为 `false`。
 - `WeightManager` 收到关闭状态后写入空 `task_weight_snapshot`。
