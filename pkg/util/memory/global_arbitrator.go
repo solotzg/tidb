@@ -176,7 +176,7 @@ func doReportGlobalMemArbitratorCounter(oriExecMetrics, newExecMetrics *execMetr
 	addTaskExecCount("success-prio-low", (newExecMetrics.Task.SuccByPriority[ArbitrationPriorityLow] - oriExecMetrics.Task.SuccByPriority[ArbitrationPriorityLow]))
 	addTaskExecCount("success-prio-medium", (newExecMetrics.Task.SuccByPriority[ArbitrationPriorityMedium] - oriExecMetrics.Task.SuccByPriority[ArbitrationPriorityMedium]))
 	addTaskExecCount("success-prio-high", (newExecMetrics.Task.SuccByPriority[ArbitrationPriorityHigh] - oriExecMetrics.Task.SuccByPriority[ArbitrationPriorityHigh]))
-	addTaskExecCount("cancel-standard-mode", (newExecMetrics.Cancel.StandardMode - oriExecMetrics.Cancel.StandardMode))
+	addTaskExecCount("cancel-standard-mode-exec", (newExecMetrics.Cancel.StandardMode - oriExecMetrics.Cancel.StandardMode))
 	addTaskExecCount("cancel-wait-averse", (newExecMetrics.Cancel.WaitAverse - oriExecMetrics.Cancel.WaitAverse))
 	addTaskExecCount("cancel-prio-low", (newExecMetrics.Cancel.PriorityMode[ArbitrationPriorityLow] - oriExecMetrics.Cancel.PriorityMode[ArbitrationPriorityLow]))
 	addTaskExecCount("cancel-prio-medium", (newExecMetrics.Cancel.PriorityMode[ArbitrationPriorityMedium] - oriExecMetrics.Cancel.PriorityMode[ArbitrationPriorityMedium]))

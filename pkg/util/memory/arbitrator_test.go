@@ -1491,7 +1491,7 @@ func TestMemArbitrator(t *testing.T) {
 		usedHeap := eleSize * budgetsNum
 		for i := range m.awaitFree.budget.shards {
 			b := &m.awaitFree.budget.shards[i]
-			require.NoError(t, b.ConsumeQuota(m.approxUnixTimeSec(), eleSize))
+			require.NoError(t, b.ConsumeQuota(m.ApproxUnixSec(), eleSize))
 		}
 		require.True(t, m.awaitFreePoolUsed().trackedHeap == 0)
 		for i := range m.awaitFree.budget.shards {
@@ -2199,7 +2199,7 @@ func TestMemArbitrator(t *testing.T) {
 		debugTime = time.Unix(defUpdateMemMagnifUtimeAlign, 0)
 		m.setUnixTimeSec(debugTime.Unix())
 
-		m.tryToUpdateBuffer(23, m.approxUnixTimeSec())
+		m.tryToUpdateBuffer(23, m.ApproxUnixSec())
 		require.True(t, m.buffer.size.Load() == 23)
 		e1ctx := m.newCtxWithHelperForTest(ArbitrationPriorityMedium, NoWaitAverse, RequirePrivilege)
 		e1ctx.arbitrateHelper.(*arbitrateHelperForTest).heapUsedCB = func() int64 {
@@ -2318,9 +2318,9 @@ func TestMemArbitrator(t *testing.T) {
 		require.Equal(t, blockedState{}, m.wrapblockedState())
 		m.setUnixTimeSec(mockTimeLine.now/kilo + defUpdateMemMagnifUtimeAlign - 1)
 		m.heapController.lastGC.heapAlloc.Store(m.limit())
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.False(t, m.doExecuteFirstTask())
-		require.Equal(t, blockedState{20000, m.approxUnixTimeSec()}, m.wrapblockedState())
+		require.Equal(t, blockedState{20000, m.ApproxUnixSec()}, m.wrapblockedState())
 		// calculate ratio of the previous
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.execMetrics.Action.RecordMemState.Succ == 3)
@@ -2334,9 +2334,9 @@ func TestMemArbitrator(t *testing.T) {
 		m.setUnixTimeSec(mockTimeLine.now/kilo + defUpdateMemMagnifUtimeAlign - 1)
 		m.mu.allocated = 40000
 		m.heapController.lastGC.heapAlloc.Store(35000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.False(t, m.doExecuteFirstTask())
-		require.Equal(t, blockedState{40000, m.approxUnixTimeSec()}, m.wrapblockedState())
+		require.Equal(t, blockedState{40000, m.ApproxUnixSec()}, m.wrapblockedState())
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.execMetrics.Action.RecordMemState.Succ == 3)
 		require.True(t, logs.info == 4) //Mem profile timeline
@@ -2347,9 +2347,9 @@ func TestMemArbitrator(t *testing.T) {
 		m.setUnixTimeSec(mockTimeLine.now/kilo + defUpdateMemMagnifUtimeAlign - 1)
 		m.mu.allocated = 50000
 		m.heapController.lastGC.heapAlloc.Store(40000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.False(t, m.doExecuteFirstTask())
-		require.Equal(t, blockedState{50000, m.approxUnixTimeSec()}, m.wrapblockedState())
+		require.Equal(t, blockedState{50000, m.ApproxUnixSec()}, m.wrapblockedState())
 		require.True(t, m.executeTick(mockTimeLine.now))
 		// no update because the heap stats is NOT safe
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == 6100)
@@ -2365,9 +2365,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now/kilo + 1)
 		m.execMu.blockedState.allocated = 50000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(40000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		// Update mem quota magnification ratio
 		// new magnification ratio
 		// timed mem profile
@@ -2380,12 +2380,12 @@ func TestMemArbitrator(t *testing.T) {
 
 		mockTimeLine.pre = mockTimeLine.now
 		mockTimeLine.now += 1 * kilo
-		m.setUnixTimeSec(m.approxUnixTimeSec() + 1)
+		m.setUnixTimeSec(m.ApproxUnixSec() + 1)
 		m.mu.allocated = 40000
 		m.heapController.lastGC.heapAlloc.Store(41000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.False(t, m.doExecuteFirstTask())
-		require.Equal(t, blockedState{40000, m.approxUnixTimeSec()}, m.wrapblockedState())
+		require.Equal(t, blockedState{40000, m.ApproxUnixSec()}, m.wrapblockedState())
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == (875+6100)/2) // no update
 		require.True(t, logs.info == 8)
@@ -2420,9 +2420,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 10000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(10000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		// no update
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == (2153+820)/2) // no update
@@ -2432,9 +2432,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 11111
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(2222)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == (2153+820)/2) // no update
 		// timed mem profile
@@ -2446,9 +2446,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 10000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(10000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == (1486+1000)/2)
 		require.True(t, logs.info == 17)
@@ -2459,9 +2459,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 10000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(5000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		checkMockTimeProfImpl(mockTimeLine.pre, 10000, 10000, 1000)
 		checkMockTimeProf(mockTimeLine.now, 5000, 10000)
@@ -2473,9 +2473,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 10000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(5000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == (1121+1000)/2)
 		require.True(t, logs.info == 23) // update mem quota magnification ratio;
@@ -2484,9 +2484,9 @@ func TestMemArbitrator(t *testing.T) {
 		nextTime()
 		m.setUnixTimeSec(mockTimeLine.now / kilo)
 		m.execMu.blockedState.allocated = 10000
-		m.execMu.blockedState.utimeSec = m.approxUnixTimeSec()
+		m.execMu.blockedState.utimeSec = m.ApproxUnixSec()
 		m.heapController.lastGC.heapAlloc.Store(20000)
-		m.heapController.lastGC.utime.Store(m.approxUnixTimeSec() * 1e9)
+		m.heapController.lastGC.utime.Store(m.ApproxUnixSec() * 1e9)
 		require.True(t, m.executeTick(mockTimeLine.now))
 		require.True(t, m.avoidance.memMagnif.ratio.Load() == 0) // smaller than 1000
 		require.True(t, logs.info == 26)
