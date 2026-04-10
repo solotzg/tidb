@@ -467,7 +467,7 @@ func (t *Tracker) Consume(bs int64) {
 						m.intoBigBudget()
 					} else {
 						b := m.smallBudget()
-						if t := m.approxUnixTimeSec(); b.getLastUsedTimeSec() != t {
+						if t := m.ApproxUnixSec(); b.getLastUsedTimeSec() != t {
 							b.setLastUsedTimeSec(t)
 						}
 						if b.Used.Load() > b.approxCapacity() && b.PullFromUpstream() != nil {
@@ -1063,6 +1063,10 @@ func (m *memArbitrator) growBigBudget() {
 	{
 		upper := m.bigBudget()
 		upper.Lock()
+		if m.killer != nil && m.killer.Signal != 0 {
+			upper.Unlock()
+			return
+		}
 
 		used, growThreshold, capacity := m.bigBudgetUsed(), m.bigBudgetGrowThreshold(), m.bigBudgetCap()
 		if used > growThreshold {
@@ -1126,7 +1130,7 @@ func (m *memArbitrator) intoBigBudget() bool {
 	}
 
 	if maxMemHint := max(m.prevMaxMem, smallUsed); maxMemHint > m.buffer.size.Load() {
-		m.tryToUpdateBuffer(maxMemHint, m.approxUnixTimeSec())
+		m.tryToUpdateBuffer(maxMemHint, m.ApproxUnixSec())
 	}
 
 	{
@@ -1142,7 +1146,7 @@ func (m *memArbitrator) intoBigBudget() bool {
 
 	m.addBigBudgetUsed(smallUsed)
 
-	m.bigBudget().Pool = root.entry.pool
+	m.bigBudget().Init(root.entry.pool)
 
 	if m.reserveSize > 0 {
 		m.reserveBigBudget(m.reserveSize)
@@ -1246,7 +1250,7 @@ func (m *memArbitrator) reset(exception bool, maxConsumed int64) bool {
 	}
 
 	if !exception {
-		m.UpdateDigestProfileCache(m.digestID, maxConsumed, m.approxUnixTimeSec())
+		m.UpdateDigestProfileCache(m.digestID, maxConsumed, m.ApproxUnixSec())
 	}
 
 	if m.useBigBudget() {
@@ -1314,7 +1318,7 @@ func (t *Tracker) InitMemArbitrator(
 	ctx.arbitrateHelper = m
 
 	if explicitReserveSize == 0 && len(digestKey) > 0 {
-		if maxMem, found := g.GetDigestProfileCache(digestID, g.approxUnixTimeSec()); found {
+		if maxMem, found := g.GetDigestProfileCache(digestID, g.ApproxUnixSec()); found {
 			m.prevMaxMem = maxMem
 		}
 	}

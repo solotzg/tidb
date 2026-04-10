@@ -624,7 +624,7 @@ type MemArbitrator struct {
 		sync.Mutex
 		lastTickUtimeMilli atomic.Int64
 	}
-	UnixTimeSec int64 // approximate unix time in seconds
+	unixTimeSec int64 // approximate unix time in seconds
 	rootPoolNum atomic.Int64
 	mode        ArbitratorWorkMode
 }
@@ -1215,13 +1215,13 @@ func (m *MemArbitrator) ResetRootPoolByID(uid uint64, maxMemConsumed int64, tune
 
 	m.tryToUpdateBuffer(
 		maxMemConsumed,
-		m.approxUnixTimeSec())
+		m.ApproxUnixSec())
 
 	if tune {
 		if maxMemConsumed > m.poolAllocStats.SmallPoolLimit {
 			m.recordMemConsumed(
 				maxMemConsumed,
-				m.approxUnixTimeSec())
+				m.ApproxUnixSec())
 		}
 	}
 
@@ -1500,7 +1500,7 @@ func (b *blockedState) reset() {
 
 //go:norace
 func (m *MemArbitrator) updateBlockedAt() {
-	m.execMu.blockedState = blockedState{m.allocated(), m.approxUnixTimeSec()}
+	m.execMu.blockedState = blockedState{m.allocated(), m.ApproxUnixSec()}
 }
 
 // Allocated returns the allocated mem quota of the mem-arbitrator
@@ -1982,7 +1982,7 @@ func (m *MemArbitrator) implicitRun() { // satisfy any subscription task
 // >= 0: execute / cancel task num
 func (m *MemArbitrator) runOneRound() (taskExecNum int) {
 	m.execMu.startTime = now()
-	if t := m.execMu.startTime.Unix(); t != m.approxUnixTimeSec() { // update per second duration and reduce force sharing
+	if t := m.execMu.startTime.Unix(); t != m.ApproxUnixSec() { // update per second duration and reduce force sharing
 		m.setUnixTimeSec(t)
 	}
 
@@ -2108,6 +2108,10 @@ type ConcurrentBudget struct {
 	_    cpuCacheLinePad
 }
 
+func (b *ConcurrentBudget) Init(pool *ResourcePool) {
+	b.Pool = pool
+}
+
 //go:norace
 func (b *ConcurrentBudget) setLastUsedTimeSec(t int64) {
 	b.LastUsedTimeSec = t
@@ -2149,16 +2153,16 @@ func (b *ConcurrentBudget) Stop() int64 {
 }
 
 // Reserve reserves a given capacity for the concurrent budget
-func (b *ConcurrentBudget) Reserve(newCap int64) (err error) {
+func (b *ConcurrentBudget) Reserve(newCap int64) error {
 	b.Lock()
+	defer b.Unlock()
 
 	extra := max(newCap, b.Used.Load(), b.Capacity) - b.Capacity
-	if err = b.Pool.allocate(extra); err == nil {
-		b.Capacity += extra
+	if err := b.Pool.allocate(extra); err != nil {
+		return err
 	}
-
-	b.Unlock()
-	return
+	b.Capacity += extra
+	return nil
 }
 
 // PullFromUpstream tries to pull from the upstream pool when facing `out of capacity`
@@ -2639,7 +2643,7 @@ func (m *MemArbitrator) updateTrackedHeapStats() {
 			return true
 		})
 		if m.buffer.size.Load() < maxMemUsed {
-			m.tryToUpdateBuffer(maxMemUsed, m.approxUnixTimeSec())
+			m.tryToUpdateBuffer(maxMemUsed, m.ApproxUnixSec())
 		}
 	}
 
@@ -3044,7 +3048,7 @@ func (m *MemArbitrator) initAwaitFreePool(allocAlignSize, shardNum int64) {
 		m.awaitFree.budget.shards = make([]TrackedConcurrentBudget, cnt)
 		m.awaitFree.budget.sizeMask = cnt - 1
 		for i := range m.awaitFree.budget.shards {
-			m.awaitFree.budget.shards[i].Pool = p
+			m.awaitFree.budget.shards[i].Init(p)
 		}
 	}
 }
@@ -3139,7 +3143,7 @@ func (m *MemArbitrator) TaskNumByPattern() (res NumByPattern) {
 
 // ConsumeQuotaFromAwaitFreePool consumes quota from the awaitfree-pool by the given uid
 func (m *MemArbitrator) ConsumeQuotaFromAwaitFreePool(uid uint64, req int64) bool {
-	return m.GetAwaitFreeBudgets(uid).ConsumeQuota(m.approxUnixTimeSec(), req) == nil
+	return m.GetAwaitFreeBudgets(uid).ConsumeQuota(m.ApproxUnixSec(), req) == nil
 }
 
 // ConsumeQuota consumes quota from the concurrent budget
@@ -3273,9 +3277,9 @@ func (m *MemArbitrator) setMemSafe() {
 
 //go:norace
 func (m *MemArbitrator) setUnixTimeSec(s int64) {
-	m.UnixTimeSec = s
+	m.unixTimeSec = s
 }
 
-func (m *MemArbitrator) approxUnixTimeSec() int64 {
-	return m.UnixTimeSec
+func (m *MemArbitrator) ApproxUnixSec() int64 {
+	return m.unixTimeSec
 }
