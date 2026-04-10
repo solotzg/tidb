@@ -313,6 +313,24 @@ func (p *PacketIO) Flush() error {
 	return err
 }
 
+// PendingWriteBytes returns bytes buffered in the server-side write path and
+// not flushed to network yet.
+func (p *PacketIO) PendingWriteBytes() int64 {
+	if p == nil {
+		return 0
+	}
+	if p.compressionAlgorithm != mysql.CompressionNone {
+		if p.compressedWriter == nil {
+			return 0
+		}
+		return p.compressedWriter.PendingWriteBytes()
+	}
+	if p.bufWriter == nil {
+		return 0
+	}
+	return int64(p.bufWriter.Buffered())
+}
+
 func newCompressedWriter(w io.Writer, ca int, seq *uint8) *compressedWriter {
 	return &compressedWriter{
 		compressorBuffer{nil, nil, nil},
@@ -333,6 +351,20 @@ type compressedWriter struct {
 	compressedPacket     *bytes.Buffer
 	compressionAlgorithm int
 	zstdLevel            zstd.EncoderLevel
+}
+
+func (cw *compressedWriter) PendingWriteBytes() int64 {
+	if cw == nil {
+		return 0
+	}
+	pending := cw.buf.Len()
+	if cw.compressedPacket != nil {
+		pending += cw.compressedPacket.Len()
+	}
+	if cw.compressorBuffer.payload != nil {
+		pending += cw.compressorBuffer.payload.Len()
+	}
+	return int64(pending)
 }
 
 func (cw *compressedWriter) Write(data []byte) (n int, err error) {

@@ -99,6 +99,42 @@ func sleepWithCtx(ctx context.Context, d time.Duration) {
 	}
 }
 
+func zipDirToWriter(zipWriter *zip.Writer, dirPath string) error {
+	return filepath.Walk(dirPath, func(filePath string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		// Skip symbolic links and non-regular files.
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(dirPath, filePath)
+		if err != nil {
+			return err
+		}
+		zipPath := filepath.ToSlash(relPath)
+
+		writer, err := zipWriter.Create(zipPath)
+		if err != nil {
+			return err
+		}
+		srcFile, err := os.Open(filepath.Clean(filePath))
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(writer, srcFile)
+		closeErr := srcFile.Close()
+		if err != nil {
+			return err
+		}
+		return closeErr
+	})
+}
+
 func (s *Server) listenStatusHTTPServer() error {
 	s.statusAddr = net.JoinHostPort(s.cfg.Status.StatusHost, strconv.Itoa(int(s.cfg.Status.StatusPort)))
 	if s.cfg.Status.StatusPort == 0 && !RunInGoTest {
@@ -517,6 +553,44 @@ func (s *Server) startHTTPServer() {
 		err = zw.Close()
 		terror.Log(err)
 	})
+
+	router.HandleFunc("/debug/mem-arbitrator/download", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			serveError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		baseDir := memory.GlobalMemArbitratorDir()
+		if baseDir == "" {
+			serveError(w, http.StatusInternalServerError, "mem arbitrator dir is unavailable")
+			return
+		}
+		st, err := os.Stat(baseDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				serveError(w, http.StatusNotFound, fmt.Sprintf("mem arbitrator dir does not exist: %s", baseDir))
+				return
+			}
+			logutil.BgLogger().Warn("stat mem arbitrator dir failed", zap.String("dir", baseDir), zap.Error(err))
+			serveError(w, http.StatusInternalServerError, "stat mem arbitrator dir failed")
+			return
+		}
+		if !st.IsDir() {
+			serveError(w, http.StatusInternalServerError, fmt.Sprintf("mem arbitrator path is not a directory: %s", baseDir))
+			return
+		}
+
+		fileName := fmt.Sprintf(`attachment; filename="mem_arbitrator-%d.zip"`, time.Now().UnixMilli())
+		w.Header().Set("Content-Type", "application/zip")
+		w.Header().Set("Content-Disposition", fileName)
+
+		zipWriter := zip.NewWriter(w)
+		if err = zipDirToWriter(zipWriter, baseDir); err != nil {
+			logutil.BgLogger().Warn("zip mem arbitrator dir failed", zap.String("dir", baseDir), zap.Error(err))
+		}
+		err = zipWriter.Close()
+		terror.Log(err)
+	}).Name("MemArbitratorDownload")
 
 	// failpoint is enabled only for tests so we can add some http APIs here for tests.
 	failpoint.Inject("enableTestAPI", func() {

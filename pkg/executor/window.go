@@ -26,6 +26,7 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/memory"
 )
 
 // WindowExec is the executor for window functions.
@@ -39,15 +40,35 @@ type WindowExec struct {
 	executed bool
 	// resultChunks stores the chunks to return
 	resultChunks []*chunk.Chunk
+	// resultChunkMemUsages stores await-free reserved bytes for each chunk in resultChunks.
+	resultChunkMemUsages []int64
 	// remainingRowsInChunk indicates how many rows the resultChunks[i] is not prepared.
 	remainingRowsInChunk []int
 
 	numWindowFuncs int
 	processor      windowProcessor
+	awaitFreeGuard memory.AwaitFreeGuard
+}
+
+// Open implements the Executor Open interface.
+func (e *WindowExec) Open(ctx context.Context) error {
+	if err := e.BaseExecutor.Open(ctx); err != nil {
+		return errors.Trace(err)
+	}
+	e.executed = false
+	e.resultChunks = e.resultChunks[:0]
+	e.resultChunkMemUsages = e.resultChunkMemUsages[:0]
+	e.remainingRowsInChunk = e.remainingRowsInChunk[:0]
+	e.awaitFreeGuard = memory.NewAwaitFreeGuard(e.Ctx().GetSessionVars().ConnectionID)
+	return nil
 }
 
 // Close implements the Executor Close interface.
 func (e *WindowExec) Close() error {
+	e.awaitFreeGuard.Close()
+	e.resultChunks = nil
+	e.resultChunkMemUsages = nil
+	e.remainingRowsInChunk = nil
 	return errors.Trace(e.BaseExecutor.Close())
 }
 
@@ -65,6 +86,10 @@ func (e *WindowExec) Next(ctx context.Context, chk *chunk.Chunk) error {
 		chk.SwapColumns(e.resultChunks[0])
 		e.resultChunks[0] = nil // GC it. TODO: Reuse it.
 		e.resultChunks = e.resultChunks[1:]
+		if len(e.resultChunkMemUsages) > 0 {
+			e.awaitFreeGuard.Shrink(e.resultChunkMemUsages[0])
+			e.resultChunkMemUsages = e.resultChunkMemUsages[1:]
+		}
 		e.remainingRowsInChunk = e.remainingRowsInChunk[1:]
 	}
 	return nil
@@ -168,7 +193,10 @@ func (e *WindowExec) fetchChild(ctx context.Context) (eof bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	chkMemBytes := int64(resultChk.MemoryUsage())
+	e.awaitFreeGuard.Grow(chkMemBytes)
 	e.resultChunks = append(e.resultChunks, resultChk)
+	e.resultChunkMemUsages = append(e.resultChunkMemUsages, chkMemBytes)
 	e.remainingRowsInChunk = append(e.remainingRowsInChunk, numRows)
 
 	e.childResult = childResult

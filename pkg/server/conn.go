@@ -107,6 +107,7 @@ import (
 	"github.com/pingcap/tidb/pkg/util/hack"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"github.com/pingcap/tidb/pkg/util/memory"
 	tlsutil "github.com/pingcap/tidb/pkg/util/tls"
 	"github.com/pingcap/tidb/pkg/util/topsql"
 	topsqlstate "github.com/pingcap/tidb/pkg/util/topsql/state"
@@ -2324,6 +2325,8 @@ func (cc *clientConn) handleFieldList(ctx context.Context, sql string) (err erro
 }
 
 // writeResultSet writes data into a result set and uses rs.Next to get row data back.
+type awaitFreeSyncFn func()
+
 // If binary is true, the data would be encoded in BINARY format.
 // serverStatus, a flag bit represents server information.
 // fetchSize, the desired number of rows to be fetched each time when client uses cursor.
@@ -2350,35 +2353,79 @@ func (cc *clientConn) writeResultSet(ctx context.Context, rs resultset.ResultSet
 	}()
 	cc.initResultEncoder(ctx)
 	defer cc.rsEncoder.Clean()
+	sessVars := cc.ctx.GetSessionVars()
+	awaitFreeGuard := memory.NewAwaitFreeGuard(sessVars.ConnectionID)
+	defer awaitFreeGuard.Close()
+	const minAdjustDeltaBytes = int64(32 * 1024)
+	lastSyncedPendingBytes := int64(-1)
+	forceSyncAwaitFreeUsage := func() {
+		if !awaitFreeGuard.Enabled() {
+			return
+		}
+		pendingBytes := int64(0)
+		if cc.pkt != nil {
+			pendingBytes = cc.pkt.PendingWriteBytes()
+		}
+		awaitFreeGuard.AdjustTo(pendingBytes)
+		lastSyncedPendingBytes = pendingBytes
+	}
+	syncAwaitFreeUsage := func() {
+		if !awaitFreeGuard.Enabled() {
+			return
+		}
+
+		pendingBytes := int64(0)
+		if cc.pkt != nil {
+			pendingBytes = cc.pkt.PendingWriteBytes()
+		}
+		if lastSyncedPendingBytes >= 0 {
+			diff := pendingBytes - lastSyncedPendingBytes
+			if diff < 0 {
+				diff = -diff
+			}
+			if pendingBytes != 0 && diff < minAdjustDeltaBytes {
+				return
+			}
+		}
+		awaitFreeGuard.AdjustTo(pendingBytes)
+		lastSyncedPendingBytes = pendingBytes
+	}
 	if mysql.HasCursorExistsFlag(serverStatus) {
 		crs, ok := rs.(resultset.CursorResultSet)
 		if !ok {
 			// this branch is actually unreachable
 			return false, errors.New("this cursor is not a resultSet")
 		}
-		if err := cc.writeChunksWithFetchSize(ctx, crs, serverStatus, fetchSize); err != nil {
+		if err := cc.writeChunksWithFetchSize(ctx, crs, serverStatus, fetchSize, syncAwaitFreeUsage); err != nil {
 			return false, err
 		}
+		forceSyncAwaitFreeUsage()
 		return false, cc.flush(ctx)
 	}
-	if retryable, err := cc.writeChunks(ctx, rs, binary, serverStatus); err != nil {
+	if retryable, err := cc.writeChunks(ctx, rs, binary, serverStatus, syncAwaitFreeUsage); err != nil {
 		return retryable, err
 	}
-
+	forceSyncAwaitFreeUsage()
 	return false, cc.flush(ctx)
 }
 
-func (cc *clientConn) writeColumnInfo(columns []*column.Info) error {
+func (cc *clientConn) writeColumnInfo(columns []*column.Info, syncAwaitFreeUsage awaitFreeSyncFn) error {
 	data := cc.alloc.AllocWithLen(4, 1024)
 	data = dump.LengthEncodedInt(data, uint64(len(columns)))
 	if err := cc.writePacket(data); err != nil {
 		return err
+	}
+	if syncAwaitFreeUsage != nil {
+		syncAwaitFreeUsage()
 	}
 	for _, v := range columns {
 		data = data[0:4]
 		data = v.Dump(data, cc.rsEncoder)
 		if err := cc.writePacket(data); err != nil {
 			return err
+		}
+		if syncAwaitFreeUsage != nil {
+			syncAwaitFreeUsage()
 		}
 	}
 	return nil
@@ -2388,7 +2435,13 @@ func (cc *clientConn) writeColumnInfo(columns []*column.Info) error {
 // binary specifies the way to dump data. It throws any error while dumping data.
 // serverStatus, a flag bit represents server information
 // The first return value indicates whether error occurs at the first call of ResultSet.Next.
-func (cc *clientConn) writeChunks(ctx context.Context, rs resultset.ResultSet, binary bool, serverStatus uint16) (bool, error) {
+func (cc *clientConn) writeChunks(
+	ctx context.Context,
+	rs resultset.ResultSet,
+	binary bool,
+	serverStatus uint16,
+	syncAwaitFreeUsage awaitFreeSyncFn,
+) (bool, error) {
 	data := cc.alloc.AllocWithLen(4, 1024)
 	req := rs.NewChunk(cc.ctx.GetSessionVars().GetChunkAllocator())
 	gotColumnInfo := false
@@ -2429,13 +2482,16 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs resultset.ResultSet, b
 			if stmtDetail != nil {
 				start = time.Now()
 			}
-			if err = cc.writeColumnInfo(columns); err != nil {
+			if err = cc.writeColumnInfo(columns, syncAwaitFreeUsage); err != nil {
 				return false, err
 			}
 			if cc.capability&mysql.ClientDeprecateEOF == 0 {
 				// metadata only needs EOF marker for old clients without ClientDeprecateEOF
 				if err = cc.writeEOF(ctx, serverStatus); err != nil {
 					return false, err
+				}
+				if syncAwaitFreeUsage != nil {
+					syncAwaitFreeUsage()
 				}
 			}
 			if stmtDetail != nil {
@@ -2468,6 +2524,9 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs resultset.ResultSet, b
 				reg.End()
 				return false, err
 			}
+			if syncAwaitFreeUsage != nil {
+				syncAwaitFreeUsage()
+			}
 		}
 		reg.End()
 		if stmtDetail != nil {
@@ -2483,6 +2542,9 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs resultset.ResultSet, b
 	}
 
 	err := cc.writeEOF(ctx, serverStatus)
+	if err == nil && syncAwaitFreeUsage != nil {
+		syncAwaitFreeUsage()
+	}
 	if stmtDetail != nil {
 		stmtDetail.WriteSQLRespDuration += time.Since(start)
 	}
@@ -2493,7 +2555,13 @@ func (cc *clientConn) writeChunks(ctx context.Context, rs resultset.ResultSet, b
 // binary specifies the way to dump data. It throws any error while dumping data.
 // serverStatus, a flag bit represents server information.
 // fetchSize, the desired number of rows to be fetched each time when client uses cursor.
-func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs resultset.CursorResultSet, serverStatus uint16, fetchSize int) error {
+func (cc *clientConn) writeChunksWithFetchSize(
+	ctx context.Context,
+	rs resultset.CursorResultSet,
+	serverStatus uint16,
+	fetchSize int,
+	syncAwaitFreeUsage awaitFreeSyncFn,
+) error {
 	var (
 		stmtDetail *execdetails.StmtExecDetails
 		err        error
@@ -2522,6 +2590,9 @@ func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs resultset
 		if err = cc.writePacket(data); err != nil {
 			return err
 		}
+		if syncAwaitFreeUsage != nil {
+			syncAwaitFreeUsage()
+		}
 
 		iter.Next(ctx)
 	}
@@ -2547,6 +2618,9 @@ func (cc *clientConn) writeChunksWithFetchSize(ctx context.Context, rs resultset
 
 	start = time.Now()
 	err = cc.writeEOF(ctx, serverStatus)
+	if err == nil && syncAwaitFreeUsage != nil {
+		syncAwaitFreeUsage()
+	}
 	if stmtDetail != nil {
 		stmtDetail.WriteSQLRespDuration += time.Since(start)
 	}

@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	rpprof "runtime/pprof"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,12 +31,16 @@ import (
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"go.uber.org/zap"
 )
 
 const (
-	memStateVer             = "v1"
-	memStateStoreNamePrefix = "mem-state."
-	memStateStoreNameSuffix = ".json"
+	memStateVer                           = "v1"
+	memStateStoreNamePrefix               = "mem-state."
+	memStateStoreNameSuffix               = ".json"
+	memRiskProfileDirName                 = "mem-risk-profiles"
+	memRiskProfileMaxKeep                 = 8
+	memRiskProfileDumpIntervalMilli int64 = 5 * 60 * 1000
 )
 
 var (
@@ -209,6 +215,84 @@ func readRuntimeMemStats() memStats {
 	}
 }
 
+func tryDumpMemRiskHeapProfile(baseDir string, lastDump *atomic.Int64) {
+	if baseDir == "" || lastDump == nil {
+		return
+	}
+	nowMilli := nowUnixMilli()
+	for {
+		last := lastDump.Load()
+		if last+memRiskProfileDumpIntervalMilli > nowMilli {
+			return
+		}
+		if lastDump.CompareAndSwap(last, nowMilli) {
+			break
+		}
+	}
+
+	profileDir := filepath.Join(baseDir, memRiskProfileDirName)
+	if err := os.MkdirAll(profileDir, 0o755); err != nil {
+		logutil.BgLogger().Warn("Failed to create mem-risk profile dir",
+			zap.String("dir", profileDir),
+			zap.Error(err))
+		return
+	}
+
+	filePath := filepath.Join(profileDir, fmt.Sprintf("heap.%d.pb.gz", nowMilli))
+	f, err := os.Create(filePath)
+	if err != nil {
+		logutil.BgLogger().Warn("Failed to create mem-risk heap profile file",
+			zap.String("path", filePath),
+			zap.Error(err))
+		return
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			logutil.BgLogger().Warn("Failed to close mem-risk heap profile file",
+				zap.String("path", filePath),
+				zap.Error(err))
+		}
+	}()
+
+	p := rpprof.Lookup("heap")
+	if p == nil {
+		logutil.BgLogger().Warn("Failed to dump mem-risk heap profile: profile unavailable")
+		return
+	}
+	if err = p.WriteTo(f, 0); err != nil {
+		logutil.BgLogger().Warn("Failed to write mem-risk heap profile",
+			zap.String("path", filePath),
+			zap.Error(err))
+		return
+	}
+	logutil.BgLogger().Info("Dumped mem-risk heap profile", zap.String("path", filePath))
+	pruneMemRiskHeapProfiles(profileDir, memRiskProfileMaxKeep)
+}
+
+func pruneMemRiskHeapProfiles(profileDir string, keep int) {
+	if keep <= 0 {
+		return
+	}
+	entries, err := os.ReadDir(profileDir)
+	if err != nil || len(entries) <= keep {
+		return
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	if len(names) <= keep {
+		return
+	}
+	sort.Strings(names)
+	for i := 0; i < len(names)-keep; i++ {
+		_ = os.Remove(filepath.Join(profileDir, names[i]))
+	}
+}
+
 // HandleGlobalMemArbitratorRuntime is used to handle runtime memory stats.
 func HandleGlobalMemArbitratorRuntime() {
 	m := GlobalMemArbitrator()
@@ -332,6 +416,7 @@ func SetupGlobalMemArbitratorForTest(baseDir string) {
 	}
 
 	_ = os.Remove(runtimeMemStateRecorderFilePath(baseDir))
+	memRiskProfileLastDump := atomic.Int64{}
 	mockinitGlobalMemArbitrator = func() *MemArbitrator {
 		m := NewMemArbitrator(
 			0,
@@ -348,6 +433,9 @@ func SetupGlobalMemArbitratorForTest(baseDir string) {
 				UpdateRuntimeMemStats: func() {
 				},
 				GC: func() {
+				},
+				TryRecordMemRiskProfile: func() {
+					tryDumpMemRiskHeapProfile(baseDir, &memRiskProfileLastDump)
 				},
 			},
 			defAwaitFreePoolAllocAlignSize,
@@ -468,6 +556,18 @@ func RegisterCallbackForGlobalMemArbitrator(f func()) {
 	globalArbitrator.enable.Unlock()
 }
 
+func globalMemArbitratorDirByCfg(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return filepath.Join(cfg.TempDir, fmt.Sprintf("mem_arbitrator-%d", cfg.Port))
+}
+
+// GlobalMemArbitratorDir returns the data directory used by global memory arbitrator.
+func GlobalMemArbitratorDir() string {
+	return globalMemArbitratorDirByCfg(config.GetGlobalConfig())
+}
+
 func initGlobalMemArbitrator() (m *MemArbitrator) {
 	if intest.InTest {
 		return mockinitGlobalMemArbitrator()
@@ -480,8 +580,8 @@ func initGlobalMemArbitrator() (m *MemArbitrator) {
 		return
 	}
 
-	cfg := config.GetGlobalConfig()
-	baseDir := filepath.Join(cfg.TempDir, fmt.Sprintf("mem_arbitrator-%d", cfg.Port))
+	baseDir := GlobalMemArbitratorDir()
+	memRiskProfileLastDump := atomic.Int64{}
 
 	limit := ServerMemoryLimit.Load()
 	if limit == 0 {
@@ -506,6 +606,9 @@ func initGlobalMemArbitrator() (m *MemArbitrator) {
 			},
 			GC: func() {
 				runtime.GC() //nolint: revive
+			},
+			TryRecordMemRiskProfile: func() {
+				tryDumpMemRiskHeapProfile(baseDir, &memRiskProfileLastDump)
 			},
 		},
 		defAwaitFreePoolAllocAlignSize,

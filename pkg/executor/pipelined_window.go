@@ -16,6 +16,7 @@ package executor
 
 import (
 	"context"
+	"unsafe"
 
 	"github.com/pingcap/errors"
 	"github.com/pingcap/tidb/pkg/executor/aggfuncs"
@@ -26,12 +27,14 @@ import (
 	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
 	"github.com/pingcap/tidb/pkg/sessionctx"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/memory"
 )
 
 type dataInfo struct {
-	chk         *chunk.Chunk
-	remaining   uint64
-	accumulated uint64
+	chk           *chunk.Chunk
+	remaining     uint64
+	accumulated   uint64
+	memUsageBytes int64
 }
 
 // PipelinedWindowExec is the executor for window functions.
@@ -75,10 +78,14 @@ type PipelinedWindowExec struct {
 	isRangeFrame             bool
 	emptyFrame               bool
 	initializedSlidingWindow bool
+	awaitFreeGuard           memory.AwaitFreeGuard
 }
 
 // Close implements the Executor Close interface.
 func (e *PipelinedWindowExec) Close() error {
+	e.awaitFreeGuard.Close()
+	e.data = nil
+	e.rows = nil
 	return errors.Trace(e.BaseExecutor.Close())
 }
 
@@ -88,7 +95,11 @@ func (e *PipelinedWindowExec) Open(ctx context.Context) (err error) {
 	e.dataIdx, e.curRowIdx, e.dropped, e.rowToConsume, e.accumulated = 0, 0, 0, 0, 0
 	e.lastStartRow, e.lastEndRow, e.stagedStartRow, e.stagedEndRow, e.rowStart, e.rowCnt = 0, 0, 0, 0, 0, 0
 	e.rows, e.data = make([]chunk.Row, 0), make([]dataInfo, 0)
-	return e.BaseExecutor.Open(ctx)
+	if err = e.BaseExecutor.Open(ctx); err != nil {
+		return err
+	}
+	e.awaitFreeGuard = memory.NewAwaitFreeGuard(e.Ctx().GetSessionVars().ConnectionID)
+	return nil
 }
 
 func (e *PipelinedWindowExec) firstResultChunkNotReady() bool {
@@ -153,6 +164,7 @@ func (e *PipelinedWindowExec) Next(ctx context.Context, chk *chunk.Chunk) (err e
 		}
 	}
 	if len(e.data) > 0 {
+		e.awaitFreeGuard.Shrink(e.data[0].memUsageBytes)
 		chk.SwapColumns(e.data[0].chk)
 		e.data = e.data[1:]
 		e.dataIdx--
@@ -188,9 +200,16 @@ func (e *PipelinedWindowExec) getRowsInPartition(ctx context.Context) (err error
 		}
 	}
 	begin, end := e.groupChecker.GetNextGroup()
+	oldRowsCap := cap(e.rows)
 	e.rowToConsume += uint64(end - begin)
 	for i := begin; i < end; i++ {
 		e.rows = append(e.rows, e.childResult.GetRow(i))
+	}
+	if newRowsCap := cap(e.rows); newRowsCap > oldRowsCap {
+		memDelta := int64(newRowsCap-oldRowsCap) * int64(unsafe.Sizeof(chunk.Row{}))
+		if memDelta > 0 {
+			e.awaitFreeGuard.Grow(memDelta)
+		}
 	}
 	return
 }
@@ -214,8 +233,10 @@ func (e *PipelinedWindowExec) fetchChild(ctx context.Context) (eof bool, err err
 	if err != nil {
 		return false, err
 	}
+	chkMemBytes := int64(resultChk.MemoryUsage())
+	e.awaitFreeGuard.Grow(chkMemBytes)
 	e.accumulated += uint64(numRows)
-	e.data = append(e.data, dataInfo{chk: resultChk, remaining: uint64(numRows), accumulated: e.accumulated})
+	e.data = append(e.data, dataInfo{chk: resultChk, remaining: uint64(numRows), accumulated: e.accumulated, memUsageBytes: chkMemBytes})
 
 	e.childResult = childResult
 	return false, nil

@@ -477,7 +477,7 @@ func (cc *clientConn) writeExecuteResultWithCursor(ctx context.Context, stmt Pre
 		}
 	}()
 
-	if err = cc.writeColumnInfo(rs.Columns()); err != nil {
+	if err = cc.writeColumnInfo(rs.Columns(), nil); err != nil {
 		return err
 	}
 

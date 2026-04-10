@@ -403,7 +403,7 @@ func expectedDatetimeExecuteResult(t *testing.T, c *mockConn, time types.Time, w
 			Decimal:      6,
 			ColumnLength: 26,
 		}}
-		require.NoError(t, conn.writeColumnInfo(cols))
+		require.NoError(t, conn.writeColumnInfo(cols, nil))
 
 		chk := chunk.NewChunkWithCapacity([]*types.FieldType{types.NewFieldType(mysql.TypeDatetime)}, 1)
 		chk.AppendTime(0, time)
