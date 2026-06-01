@@ -54,6 +54,7 @@ import (
 	"github.com/pingcap/tidb/pkg/store"
 	"github.com/pingcap/tidb/pkg/util"
 	"github.com/pingcap/tidb/pkg/util/cpuprofile"
+	"github.com/pingcap/tidb/pkg/util/executorflags"
 	"github.com/pingcap/tidb/pkg/util/logutil"
 	"github.com/pingcap/tidb/pkg/util/memory"
 	"github.com/pingcap/tidb/pkg/util/printer"
@@ -207,6 +208,69 @@ func (b *Ballast) GenHTTPHandler() func(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func handleIndexLookupJoinChunkInitCap(w http.ResponseWriter, r *http.Request) {
+	writeState := func() {
+		w.Header().Set("Content-Type", "application/json")
+		useMaxChunkSize := executorflags.IndexLookupJoinUseMaxChunkSizeForInitCap.Load()
+		mode := "init-cap"
+		if useMaxChunkSize {
+			mode = "max-chunk-size"
+		}
+		err := json.NewEncoder(w).Encode(struct {
+			UseMaxChunkSize bool   `json:"use_max_chunk_size"`
+			Mode            string `json:"mode"`
+		}{
+			UseMaxChunkSize: useMaxChunkSize,
+			Mode:            mode,
+		})
+		terror.Log(err)
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		writeState()
+	case http.MethodPost:
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_, err = w.Write([]byte(err.Error()))
+			terror.Log(err)
+			return
+		}
+
+		var useMaxChunkSize bool
+		bodyText := strings.TrimSpace(string(body))
+		if len(bodyText) > 0 && strings.HasPrefix(bodyText, "{") {
+			var req struct {
+				UseMaxChunkSize bool `json:"use_max_chunk_size"`
+			}
+			if err = json.Unmarshal(body, &req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, err = w.Write([]byte(err.Error()))
+				terror.Log(err)
+				return
+			}
+			useMaxChunkSize = req.UseMaxChunkSize
+		} else {
+			if bodyText == "" {
+				bodyText = r.FormValue("use_max_chunk_size")
+			}
+			useMaxChunkSize, err = strconv.ParseBool(bodyText)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_, err = w.Write([]byte(err.Error()))
+				terror.Log(err)
+				return
+			}
+		}
+
+		executorflags.IndexLookupJoinUseMaxChunkSizeForInitCap.Store(useMaxChunkSize)
+		writeState()
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) startHTTPServer() {
 	router := mux.NewRouter()
 
@@ -323,6 +387,7 @@ func (s *Server) startHTTPServer() {
 		}
 	}
 	router.HandleFunc("/debug/ballast-object-sz", ballast.GenHTTPHandler())
+	router.HandleFunc("/debug/index-lookup-join-chunk-init-cap", handleIndexLookupJoinChunkInitCap)
 
 	router.HandleFunc("/debug/gogc", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
