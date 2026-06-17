@@ -61,6 +61,7 @@ type DistSQLContext struct {
 	TiFlashMaxQueryMemoryPerNode         int64
 	TiFlashQuerySpillRatio               float64
 
+	QueryCopRequestRateLimit      kv.CoprRequestLimiter
 	DistSQLConcurrency            int
 	ReplicaReadType               kv.ReplicaReadType
 	WeakConsistency               bool

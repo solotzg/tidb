@@ -776,6 +776,9 @@ type SessionVars struct {
 	Concurrency
 	MemQuota
 	BatchSize
+	// QueryCopRequestConcurrencyLimit limits the aggregate TiKV cop request concurrency for a single query.
+	// A value of 0 disables the limit.
+	QueryCopRequestConcurrencyLimit int
 	// DMLBatchSize indicates the number of rows batch-committed for a statement.
 	// It will be used when using LOAD DATA or BatchInsert or BatchDelete is on.
 	DMLBatchSize        int
@@ -2327,6 +2330,7 @@ func NewSessionVars(hctx HookContext) *SessionVars {
 
 		TiDBOptEnableAdvancedJoinReorder: DefTiDBOptEnableAdvancedJoinReorder,
 	}
+	vars.QueryCopRequestConcurrencyLimit = DefQueryCopRequestConcurrencyLimit
 	vars.TiFlashFineGrainedShuffleBatchSize = DefTiFlashFineGrainedShuffleBatchSize
 	vars.status.Store(uint32(mysql.ServerStatusAutocommit))
 	vars.StmtCtx.ResourceGroupName = resourcegroup.DefaultResourceGroupName

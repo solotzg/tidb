@@ -1454,6 +1454,7 @@ func TestSetConcurrency(t *testing.T) {
 	tk.MustQuery("select @@tidb_streamagg_concurrency;").Check(testkit.Rows(strconv.Itoa(variable.DefTiDBStreamAggConcurrency)))
 	tk.MustQuery("select @@tidb_projection_concurrency;").Check(testkit.Rows(strconv.Itoa(variable.ConcurrencyUnset)))
 	tk.MustQuery("select @@tidb_distsql_scan_concurrency;").Check(testkit.Rows(strconv.Itoa(variable.DefDistSQLScanConcurrency)))
+	tk.MustQuery("select @@tidb_query_cop_request_concurrency_limit;").Check(testkit.Rows(strconv.Itoa(variable.DefQueryCopRequestConcurrencyLimit)))
 
 	tk.MustQuery("select @@tidb_index_serial_scan_concurrency;").Check(testkit.Rows(strconv.Itoa(variable.DefIndexSerialScanConcurrency)))
 
@@ -1468,6 +1469,7 @@ func TestSetConcurrency(t *testing.T) {
 	require.Equal(t, variable.DefTiDBStreamAggConcurrency, vars.StreamAggConcurrency())
 	require.Equal(t, variable.DefExecutorConcurrency, vars.ProjectionConcurrency())
 	require.Equal(t, variable.DefDistSQLScanConcurrency, vars.DistSQLScanConcurrency())
+	require.Equal(t, variable.DefQueryCopRequestConcurrencyLimit, vars.QueryCopRequestConcurrencyLimit)
 
 	require.Equal(t, variable.DefIndexSerialScanConcurrency, vars.IndexSerialScanConcurrency())
 
@@ -1507,6 +1509,10 @@ func TestSetConcurrency(t *testing.T) {
 	tk.MustExec(fmt.Sprintf("set @@%s=1;", variable.TiDBDistSQLScanConcurrency))
 	tk.MustQuery(fmt.Sprintf("select @@%s;", variable.TiDBDistSQLScanConcurrency)).Check(testkit.Rows("1"))
 	require.Equal(t, 1, vars.DistSQLScanConcurrency())
+
+	tk.MustExec(fmt.Sprintf("set @@%s=8;", variable.TiDBQueryCopRequestConcurrencyLimit))
+	tk.MustQuery(fmt.Sprintf("select @@%s;", variable.TiDBQueryCopRequestConcurrencyLimit)).Check(testkit.Rows("8"))
+	require.Equal(t, 8, vars.QueryCopRequestConcurrencyLimit)
 
 	tk.MustExec("set @@tidb_index_serial_scan_concurrency=4")
 	tk.MustQuery("show warnings").Check(testkit.Rows())

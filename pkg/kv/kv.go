@@ -407,6 +407,154 @@ const (
 	UnSpecified = 255
 )
 
+// CoprRequestLimiter limits the aggregate number of in-flight cop request
+// attempts.
+//
+// A token is acquired before SendReqCtx sends one cop request attempt and is
+// released after SendReqCtx returns. The token therefore covers the RPC
+// send/receive phase only. It does not cover result consumption after the
+// response has been handed back to the cop iterator.
+//
+// Implementations can represent different scopes, such as a local operator
+// limiter, a statement/query limiter, or a future store-level limiter. When
+// multiple scopes are required, use NewCompositeCoprRequestLimiter and pass
+// limiters from the narrowest scope to the widest shared scope. For example:
+//
+//	local -> query -> store
+//
+// The intended next step is to add a store-scoped limiter that is shared by
+// requests targeting the same TiKV store. That limiter should be adaptive to
+// store-side pressure signals and should be resolved after the cop task target
+// store is known, then appended to the existing local/query path. Keeping the
+// store limiter as the widest scope lets one store apply backpressure across
+// queries and, eventually, across TiDB instances without changing the local
+// statement-level contract here.
+type CoprRequestLimiter interface {
+	// Acquire blocks until this limiter admits one request attempt or done is
+	// closed. The returned release function must be called exactly once when
+	// exit is false. When exit is true, no token is held and callers should stop
+	// the current request attempt.
+	Acquire(done <-chan struct{}) (release func(), exit bool)
+
+	// Capacity returns the effective maximum number of concurrent request
+	// attempts allowed by this limiter. Composite limiters report the smallest
+	// capacity among their children because that is the effective upper bound.
+	Capacity() int
+}
+
+type coprRequestRateLimit struct {
+	*util.RateLimit
+}
+
+// NewCoprRequestRateLimit creates a cop request limiter with capacity n.
+func NewCoprRequestRateLimit(n int) CoprRequestLimiter {
+	if n <= 0 {
+		return nil
+	}
+	return WrapCoprRequestRateLimit(util.NewRateLimit(n))
+}
+
+// WrapCoprRequestRateLimit adapts a TiKV client-go RateLimit to CoprRequestLimiter.
+func WrapCoprRequestRateLimit(rateLimit *util.RateLimit) CoprRequestLimiter {
+	if rateLimit == nil {
+		return nil
+	}
+	return &coprRequestRateLimit{RateLimit: rateLimit}
+}
+
+func (r *coprRequestRateLimit) Acquire(done <-chan struct{}) (release func(), exit bool) {
+	if r.GetToken(done) {
+		return nil, true
+	}
+	return r.PutToken, false
+}
+
+func (r *coprRequestRateLimit) Capacity() int {
+	return r.GetCapacity()
+}
+
+type compositeCoprRequestLimiter struct {
+	limiters []CoprRequestLimiter
+}
+
+// NewCompositeCoprRequestLimiter returns a limiter that acquires every input
+// limiter in order and releases acquired limiters in the reverse order.
+//
+// The order is significant. Callers should pass limiters from the most local
+// scope to the most shared scope, for example local -> query -> store. This
+// avoids holding a scarce shared token while waiting on a narrower limiter that
+// is only relevant to the current operator or statement.
+//
+// Future store-level backpressure should follow the same rule. A request should
+// first pass the local operator limiter, then the statement/query limiter, and
+// only then acquire the store limiter selected for the final target store. All
+// call sites must keep this order consistent; mixing store -> query with
+// query -> store in another path can introduce unnecessary blocking and, with
+// multiple shared limiters, potential circular waits.
+//
+// Nil limiters are ignored and nested composites are flattened so callers can
+// build limiter paths incrementally without adding unnecessary wrapper layers.
+func NewCompositeCoprRequestLimiter(limiters ...CoprRequestLimiter) CoprRequestLimiter {
+	compacted := make([]CoprRequestLimiter, 0, len(limiters))
+	for _, limiter := range limiters {
+		if limiter == nil {
+			continue
+		}
+		if composite, ok := limiter.(*compositeCoprRequestLimiter); ok {
+			compacted = append(compacted, composite.limiters...)
+			continue
+		}
+		compacted = append(compacted, limiter)
+	}
+	switch len(compacted) {
+	case 0:
+		return nil
+	case 1:
+		return compacted[0]
+	default:
+		return &compositeCoprRequestLimiter{limiters: compacted}
+	}
+}
+
+func (c *compositeCoprRequestLimiter) Acquire(done <-chan struct{}) (release func(), exit bool) {
+	releases := make([]func(), 0, len(c.limiters))
+	for _, limiter := range c.limiters {
+		release, exit := limiter.Acquire(done)
+		if exit {
+			// If a later limiter cannot be acquired because the iterator is
+			// closed, roll back all tokens that were already acquired. Release
+			// in reverse order to match the normal composite release path.
+			for i := len(releases) - 1; i >= 0; i-- {
+				if releases[i] != nil {
+					releases[i]()
+				}
+			}
+			return nil, true
+		}
+		releases = append(releases, release)
+	}
+	return func() {
+		// Reverse release mirrors nested resource acquisition. This is
+		// especially important once a wider shared limiter, such as a store
+		// limiter, is added after local and query limiters.
+		for i := len(releases) - 1; i >= 0; i-- {
+			if releases[i] != nil {
+				releases[i]()
+			}
+		}
+	}, false
+}
+
+func (c *compositeCoprRequestLimiter) Capacity() int {
+	capacity := 0
+	for i, limiter := range c.limiters {
+		if i == 0 || limiter.Capacity() < capacity {
+			capacity = limiter.Capacity()
+		}
+	}
+	return capacity
+}
+
 // Name returns the name of store type.
 func (t StoreType) Name() string {
 	if t == TiFlash {
@@ -592,7 +740,7 @@ type Request struct {
 	// CoprRequestRateLimit, if not nil, is used as the shared in-flight request
 	// limiter for all cop iterators created from this request. The token lifecycle
 	// is tied to request send/response receive instead of result consumption.
-	CoprRequestRateLimit *util.RateLimit
+	CoprRequestRateLimit CoprRequestLimiter
 	// IsolationLevel is the isolation level, default is SI.
 	IsolationLevel IsoLevel
 	// Priority is the priority of this KV request, its value may be PriorityNormal/PriorityLow/PriorityHigh.

@@ -735,8 +735,13 @@ type copIteratorWorker struct {
 	respChan chan<- *copResponse
 	finishCh <-chan struct{}
 	// requestRateLimit controls the aggregate number of in-flight cop requests.
-	// The token lifecycle is tied to one send attempt instead of response consumption.
-	requestRateLimit *util.RateLimit
+	// The token lifecycle is tied to request send/response receive instead of result consumption.
+	//
+	// Today this field carries the request-local and statement/query limiter
+	// path. A future store-level backpressure limiter should be selected per
+	// task after the target store is known, then composed after requestRateLimit
+	// so the acquire order remains local -> query -> store.
+	requestRateLimit kv.CoprRequestLimiter
 	vars             *tikv.Variables
 	kvclient         *txnsnapshot.ClientHelper
 
@@ -1028,7 +1033,7 @@ func (it *copIterator) GetSendRate() *util.RateLimit {
 }
 
 // GetRequestRateLimit returns the shared request rate-limit object.
-func (it *copIterator) GetRequestRateLimit() *util.RateLimit {
+func (it *copIterator) GetRequestRateLimit() kv.CoprRequestLimiter {
 	return it.req.CoprRequestRateLimit
 }
 
@@ -1387,19 +1392,25 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask) (*
 		ops = append(ops, tikv.WithMatchStores([]uint64{*task.redirect2Replica}))
 	}
 
+	var releaseRateLimit func()
 	if worker.requestRateLimit != nil {
-		exit := worker.requestRateLimit.GetToken(worker.finishCh)
+		var exit bool
+		releaseRateLimit, exit = worker.requestRateLimit.Acquire(worker.finishCh)
 		if exit {
 			return nil, nil
 		}
 	}
+	// Future store-scoped backpressure belongs in this part of the send path,
+	// not in distsql.Select, because only the cop task/region routing path can
+	// resolve the final target store. When added, compose that store limiter
+	// after worker.requestRateLimit to preserve local -> query -> store ordering.
 	// Keep the request-rate token and send attempt in a small scope so the
 	// token is released immediately after the send attempt returns, while
 	// still remaining panic-safe.
 	resp, rpcCtx, storeAddr, err := func() (*tikvrpc.Response, *tikv.RPCContext, string, error) {
 		defer func() {
-			if worker.requestRateLimit != nil {
-				worker.requestRateLimit.PutToken()
+			if releaseRateLimit != nil {
+				releaseRateLimit()
 			}
 		}()
 		failpoint.InjectCall("onBeforeSendReqCtx", req)

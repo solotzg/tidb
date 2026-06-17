@@ -59,6 +59,29 @@ func Select(ctx context.Context, dctx *distsqlctx.DistSQLContext, kvReq *kv.Requ
 	r, ctx := tracing.StartRegionEx(ctx, "distsql.Select")
 	defer r.End()
 
+	if kvReq.StoreType == kv.TiKV && dctx.QueryCopRequestRateLimit != nil {
+		// Preserve the request-local cop limiter and append the statement/query
+		// limiter as a wider scope. The composite limiter acquires tokens in the
+		// order provided here, so keep the path from the narrowest scope to the
+		// widest shared scope:
+		//
+		//   local request -> statement/query -> future store/global limiter
+		//
+		// This prevents a worker from occupying a scarce shared token while it is
+		// still waiting for a narrower local token. The release path is handled by
+		// the composite limiter in the reverse order.
+		//
+		// Do not attach a store-level limiter here. Select only knows the request
+		// store type, not the final TiKV store selected for each cop task. A
+		// future store backpressure limiter should be resolved in the cop iterator
+		// send path after the task target is known, and then appended after this
+		// local/query limiter path.
+		kvReq.CoprRequestRateLimit = kv.NewCompositeCoprRequestLimiter(
+			kvReq.CoprRequestRateLimit,
+			dctx.QueryCopRequestRateLimit,
+		)
+	}
+
 	// For testing purpose.
 	if hook := ctx.Value("CheckSelectRequestHook"); hook != nil {
 		hook.(func(*kv.Request))(kvReq)

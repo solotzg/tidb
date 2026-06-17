@@ -317,6 +317,10 @@ const (
 	// If the query has a LIMIT clause, high concurrency makes the system do much more work than needed.
 	TiDBDistSQLScanConcurrency = "tidb_distsql_scan_concurrency"
 
+	// TiDBQueryCopRequestConcurrencyLimit is used to limit the aggregate TiKV cop request concurrency for a single query.
+	// A value of 0 disables the limit.
+	TiDBQueryCopRequestConcurrencyLimit = "tidb_query_cop_request_concurrency_limit"
+
 	// TiDBAnalyzeDistSQLScanConcurrency is the number of concurrent workers to scan regions to collect statistics (FMSketch, Samples).
 	// For auto analyze, the value is controlled by tidb_sysproc_scan_concurrency variable.
 	TiDBAnalyzeDistSQLScanConcurrency = "tidb_analyze_distsql_scan_concurrency"
@@ -1324,6 +1328,7 @@ const (
 	DefIndexJoinBatchSize                   = 25000
 	DefIndexLookupSize                      = 20000
 	DefDistSQLScanConcurrency               = 15
+	DefQueryCopRequestConcurrencyLimit      = 0
 	DefAnalyzeDistSQLScanConcurrency        = 4
 	DefBuildStatsConcurrency                = 2
 	DefBuildSamplingStatsConcurrency        = 2

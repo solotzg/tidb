@@ -33,7 +33,6 @@ import (
 	"github.com/pingcap/tidb/pkg/testkit"
 	"github.com/stretchr/testify/require"
 	"github.com/tikv/client-go/v2/testutils"
-	tikvutil "github.com/tikv/client-go/v2/util"
 	pd "github.com/tikv/pd/client"
 	rmclient "github.com/tikv/pd/client/resource_group/controller"
 )
@@ -134,7 +133,7 @@ func TestBuildCopIteratorWithSharedRequestRateLimit(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			shared := tikvutil.NewRateLimit(7)
+			shared := kv.NewCoprRequestRateLimit(7)
 			req := &kv.Request{
 				Tp:                   kv.ReqTypeDAG,
 				KeyRanges:            kv.NewNonPartitionedKeyRanges(ranges),
@@ -145,7 +144,7 @@ func TestBuildCopIteratorWithSharedRequestRateLimit(t *testing.T) {
 			it, errRes := copClient.BuildCopIterator(ctx, req, vars, opt)
 			require.Nil(t, errRes)
 			require.Same(t, shared, it.GetRequestRateLimit())
-			require.Equal(t, 7, it.GetRequestRateLimit().GetCapacity())
+			require.Equal(t, 7, it.GetRequestRateLimit().Capacity())
 		})
 	}
 }

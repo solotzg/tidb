@@ -2003,6 +2003,10 @@ var defaultSysVars = []*SysVar{
 		s.distSQLScanConcurrency = tidbOptPositiveInt32(val, DefDistSQLScanConcurrency)
 		return nil
 	}},
+	{Scope: ScopeGlobal | ScopeSession, Name: TiDBQueryCopRequestConcurrencyLimit, Value: strconv.Itoa(DefQueryCopRequestConcurrencyLimit), Type: TypeUnsigned, MinValue: 0, MaxValue: MaxConfigurableConcurrency, SetSession: func(s *SessionVars, val string) error {
+		s.QueryCopRequestConcurrencyLimit = TidbOptInt(val, DefQueryCopRequestConcurrencyLimit)
+		return nil
+	}},
 	{Scope: ScopeGlobal | ScopeSession, Name: TiDBAnalyzeDistSQLScanConcurrency, Value: strconv.Itoa(DefAnalyzeDistSQLScanConcurrency), Type: TypeUnsigned, MinValue: 0, MaxValue: math.MaxInt32, SetSession: func(s *SessionVars, val string) error {
 		s.analyzeDistSQLScanConcurrency = tidbOptPositiveInt32(val, DefAnalyzeDistSQLScanConcurrency)
 		return nil
