@@ -147,9 +147,8 @@ func TestSelectAppliesQueryCopRequestRateLimit(t *testing.T) {
 	response, err = Select(checkRequest(func(req *kv.Request) {
 		require.NotSame(t, explicitRateLimit, req.CoprRequestRateLimit)
 		require.Equal(t, 3, req.CoprRequestRateLimit.Capacity())
-		release, exit := req.CoprRequestRateLimit.Acquire(make(chan struct{}))
-		require.False(t, exit)
-		release()
+		require.False(t, req.CoprRequestRateLimit.Acquire(make(chan struct{})))
+		req.CoprRequestRateLimit.Release()
 	}), dctx, request, colTypes)
 	require.NoError(t, err)
 	require.NoError(t, response.Close())

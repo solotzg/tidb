@@ -431,10 +431,14 @@ const (
 // statement-level contract here.
 type CoprRequestLimiter interface {
 	// Acquire blocks until this limiter admits one request attempt or done is
-	// closed. The returned release function must be called exactly once when
-	// exit is false. When exit is true, no token is held and callers should stop
-	// the current request attempt.
-	Acquire(done <-chan struct{}) (release func(), exit bool)
+	// closed. When exit is false, callers must call Release exactly once after
+	// the request attempt finishes. When exit is true, no token is held and
+	// callers should stop the current request attempt.
+	Acquire(done <-chan struct{}) (exit bool)
+
+	// Release releases one token acquired by Acquire. It must only be called
+	// after Acquire returns false.
+	Release()
 
 	// Capacity returns the effective maximum number of concurrent request
 	// attempts allowed by this limiter. Composite limiters report the smallest
@@ -442,8 +446,9 @@ type CoprRequestLimiter interface {
 	Capacity() int
 }
 
-type coprRequestRateLimit struct {
-	*util.RateLimit
+type fixedCoprRequestLimiter struct {
+	capacity int
+	tokens   chan struct{}
 }
 
 // NewCoprRequestRateLimit creates a cop request limiter with capacity n.
@@ -451,26 +456,31 @@ func NewCoprRequestRateLimit(n int) CoprRequestLimiter {
 	if n <= 0 {
 		return nil
 	}
-	return WrapCoprRequestRateLimit(util.NewRateLimit(n))
-}
-
-// WrapCoprRequestRateLimit adapts a TiKV client-go RateLimit to CoprRequestLimiter.
-func WrapCoprRequestRateLimit(rateLimit *util.RateLimit) CoprRequestLimiter {
-	if rateLimit == nil {
-		return nil
+	return &fixedCoprRequestLimiter{
+		capacity: n,
+		tokens:   make(chan struct{}, n),
 	}
-	return &coprRequestRateLimit{RateLimit: rateLimit}
 }
 
-func (r *coprRequestRateLimit) Acquire(done <-chan struct{}) (release func(), exit bool) {
-	if r.GetToken(done) {
-		return nil, true
+func (l *fixedCoprRequestLimiter) Acquire(done <-chan struct{}) (exit bool) {
+	select {
+	case <-done:
+		return true
+	case l.tokens <- struct{}{}:
+		return false
 	}
-	return r.PutToken, false
 }
 
-func (r *coprRequestRateLimit) Capacity() int {
-	return r.GetCapacity()
+func (l *fixedCoprRequestLimiter) Release() {
+	select {
+	case <-l.tokens:
+	default:
+		panic("release a redundant cop request token")
+	}
+}
+
+func (l *fixedCoprRequestLimiter) Capacity() int {
+	return l.capacity
 }
 
 type compositeCoprRequestLimiter struct {
@@ -516,33 +526,30 @@ func NewCompositeCoprRequestLimiter(limiters ...CoprRequestLimiter) CoprRequestL
 	}
 }
 
-func (c *compositeCoprRequestLimiter) Acquire(done <-chan struct{}) (release func(), exit bool) {
-	releases := make([]func(), 0, len(c.limiters))
+func (c *compositeCoprRequestLimiter) Acquire(done <-chan struct{}) (exit bool) {
+	acquired := 0
 	for _, limiter := range c.limiters {
-		release, exit := limiter.Acquire(done)
-		if exit {
+		if limiter.Acquire(done) {
 			// If a later limiter cannot be acquired because the iterator is
 			// closed, roll back all tokens that were already acquired. Release
 			// in reverse order to match the normal composite release path.
-			for i := len(releases) - 1; i >= 0; i-- {
-				if releases[i] != nil {
-					releases[i]()
-				}
+			for i := acquired - 1; i >= 0; i-- {
+				c.limiters[i].Release()
 			}
-			return nil, true
+			return true
 		}
-		releases = append(releases, release)
+		acquired++
 	}
-	return func() {
-		// Reverse release mirrors nested resource acquisition. This is
-		// especially important once a wider shared limiter, such as a store
-		// limiter, is added after local and query limiters.
-		for i := len(releases) - 1; i >= 0; i-- {
-			if releases[i] != nil {
-				releases[i]()
-			}
-		}
-	}, false
+	return false
+}
+
+func (c *compositeCoprRequestLimiter) Release() {
+	// Reverse release mirrors nested resource acquisition. This is especially
+	// important once a wider shared limiter, such as a store limiter, is added
+	// after local and query limiters.
+	for i := len(c.limiters) - 1; i >= 0; i-- {
+		c.limiters[i].Release()
+	}
 }
 
 func (c *compositeCoprRequestLimiter) Capacity() int {

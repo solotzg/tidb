@@ -29,17 +29,13 @@ func TestCompositeCoprRequestLimiter(t *testing.T) {
 	require.Equal(t, 1, limiter.Capacity())
 
 	done := make(chan struct{})
-	release, exit := limiter.Acquire(done)
-	require.False(t, exit)
-	require.NotNil(t, release)
+	require.False(t, limiter.Acquire(done))
 
 	blocked := make(chan struct{})
 	go func() {
 		defer close(blocked)
-		release2, exit2 := limiter.Acquire(done)
-		require.False(t, exit2)
-		require.NotNil(t, release2)
-		release2()
+		require.False(t, limiter.Acquire(done))
+		limiter.Release()
 	}()
 
 	select {
@@ -48,7 +44,7 @@ func TestCompositeCoprRequestLimiter(t *testing.T) {
 	case <-time.After(10 * time.Millisecond):
 	}
 
-	release()
+	limiter.Release()
 	select {
 	case <-blocked:
 	case <-time.After(time.Second):
@@ -59,9 +55,8 @@ func TestCompositeCoprRequestLimiter(t *testing.T) {
 func TestCompositeCoprRequestLimiterReleasesAcquiredTokensOnExit(t *testing.T) {
 	limiter1 := NewCoprRequestRateLimit(1)
 	limiter2 := NewCoprRequestRateLimit(1)
-	release2, exit := limiter2.Acquire(make(chan struct{}))
-	require.False(t, exit)
-	defer release2()
+	require.False(t, limiter2.Acquire(make(chan struct{})))
+	defer limiter2.Release()
 
 	limiter := NewCompositeCoprRequestLimiter(limiter1, limiter2)
 	done := make(chan struct{})
@@ -69,9 +64,9 @@ func TestCompositeCoprRequestLimiterReleasesAcquiredTokensOnExit(t *testing.T) {
 	result := make(chan bool)
 	go func() {
 		close(acquired)
-		release, exit := limiter.Acquire(done)
-		if release != nil {
-			release()
+		exit := limiter.Acquire(done)
+		if !exit {
+			limiter.Release()
 		}
 		result <- exit
 	}()
@@ -80,7 +75,6 @@ func TestCompositeCoprRequestLimiterReleasesAcquiredTokensOnExit(t *testing.T) {
 	close(done)
 	require.True(t, <-result)
 
-	release1, exit := limiter1.Acquire(make(chan struct{}))
-	require.False(t, exit)
-	release1()
+	require.False(t, limiter1.Acquire(make(chan struct{})))
+	limiter1.Release()
 }

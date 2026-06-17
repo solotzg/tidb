@@ -1392,13 +1392,12 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask) (*
 		ops = append(ops, tikv.WithMatchStores([]uint64{*task.redirect2Replica}))
 	}
 
-	var releaseRateLimit func()
+	acquiredRequestRateLimit := false
 	if worker.requestRateLimit != nil {
-		var exit bool
-		releaseRateLimit, exit = worker.requestRateLimit.Acquire(worker.finishCh)
-		if exit {
+		if worker.requestRateLimit.Acquire(worker.finishCh) {
 			return nil, nil
 		}
+		acquiredRequestRateLimit = true
 	}
 	// Future store-scoped backpressure belongs in this part of the send path,
 	// not in distsql.Select, because only the cop task/region routing path can
@@ -1409,8 +1408,8 @@ func (worker *copIteratorWorker) handleTaskOnce(bo *Backoffer, task *copTask) (*
 	// still remaining panic-safe.
 	resp, rpcCtx, storeAddr, err := func() (*tikvrpc.Response, *tikv.RPCContext, string, error) {
 		defer func() {
-			if releaseRateLimit != nil {
-				releaseRateLimit()
+			if acquiredRequestRateLimit {
+				worker.requestRateLimit.Release()
 			}
 		}()
 		failpoint.InjectCall("onBeforeSendReqCtx", req)
