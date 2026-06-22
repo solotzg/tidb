@@ -431,6 +431,11 @@ const (
 // queries and, eventually, across TiDB instances without changing the local
 // statement-level contract here.
 type CoprRequestLimiter interface {
+	// Capacity returns the maximum number of request attempts this limiter can
+	// admit concurrently. For composite limiters, this is the effective upper
+	// bound of the whole path.
+	Capacity() int
+
 	// Acquire blocks until this limiter admits one request attempt or done is
 	// closed. When exit is false, callers must call Release exactly once after
 	// the request attempt finishes. When exit is true, no token is held and
@@ -658,13 +663,7 @@ func (c *compositeCoprRequestLimiter) Release() {
 func (c *compositeCoprRequestLimiter) Capacity() int {
 	capacity := 0
 	for _, limiter := range c.limiters {
-		capLimiter, ok := limiter.(interface {
-			Capacity() int
-		})
-		if !ok {
-			continue
-		}
-		c := capLimiter.Capacity()
+		c := limiter.Capacity()
 		if capacity == 0 || c < capacity {
 			capacity = c
 		}

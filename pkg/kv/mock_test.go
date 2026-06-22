@@ -25,15 +25,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type coprRequestLimiterWithCapacity interface {
-	Capacity() int
-}
-
 func requireCoprRequestLimiterCapacity(t *testing.T, limiter CoprRequestLimiter, expected int) {
 	t.Helper()
-	capLimiter, ok := limiter.(coprRequestLimiterWithCapacity)
-	require.True(t, ok)
-	require.Equal(t, expected, capLimiter.Capacity())
+	require.Equal(t, expected, limiter.Capacity())
 }
 
 func TestCoprRequestLimiterWaitsUntilRelease(t *testing.T) {
