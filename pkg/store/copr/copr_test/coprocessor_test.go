@@ -144,7 +144,11 @@ func TestBuildCopIteratorWithSharedRequestRateLimit(t *testing.T) {
 			it, errRes := copClient.BuildCopIterator(ctx, req, vars, opt)
 			require.Nil(t, errRes)
 			require.Same(t, shared, it.GetRequestRateLimit())
-			require.Equal(t, 7, it.GetRequestRateLimit().Capacity())
+			capLimiter, ok := it.GetRequestRateLimit().(interface {
+				Capacity() int
+			})
+			require.True(t, ok)
+			require.Equal(t, 7, capLimiter.Capacity())
 		})
 	}
 }

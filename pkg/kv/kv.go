@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/tls"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/pingcap/errors"
@@ -439,16 +440,24 @@ type CoprRequestLimiter interface {
 	// Release releases one token acquired by Acquire. It must only be called
 	// after Acquire returns false.
 	Release()
-
-	// Capacity returns the effective maximum number of concurrent request
-	// attempts allowed by this limiter. Composite limiters report the smallest
-	// capacity among their children because that is the effective upper bound.
-	Capacity() int
 }
 
 type fixedCoprRequestLimiter struct {
-	capacity int
-	tokens   chan struct{}
+	capacity int64
+	inflight atomic.Int64
+	waiters  atomic.Int64
+
+	mu   sync.Mutex
+	head *coprRequestWaiter
+	tail *coprRequestWaiter
+}
+
+type coprRequestWaiter struct {
+	ready    chan struct{}
+	prev     *coprRequestWaiter
+	next     *coprRequestWaiter
+	queued   bool
+	admitted bool
 }
 
 // NewCoprRequestRateLimit creates a cop request limiter with capacity n.
@@ -457,30 +466,124 @@ func NewCoprRequestRateLimit(n int) CoprRequestLimiter {
 		return nil
 	}
 	return &fixedCoprRequestLimiter{
-		capacity: n,
-		tokens:   make(chan struct{}, n),
+		capacity: int64(n),
 	}
 }
 
 func (l *fixedCoprRequestLimiter) Acquire(done <-chan struct{}) (exit bool) {
+	if l.tryAcquireFast() {
+		return false
+	}
+
 	select {
 	case <-done:
 		return true
-	case l.tokens <- struct{}{}:
+	default:
+	}
+
+	waiter := &coprRequestWaiter{ready: make(chan struct{})}
+	l.waiters.Inc()
+	l.mu.Lock()
+	if l.head == nil && l.tryAcquire() {
+		l.waiters.Dec()
+		l.mu.Unlock()
+		return false
+	}
+	l.pushWaiter(waiter)
+	l.mu.Unlock()
+
+	select {
+	case <-done:
+		l.mu.Lock()
+		if waiter.admitted {
+			l.mu.Unlock()
+			return false
+		}
+		if waiter.queued {
+			l.removeWaiter(waiter)
+			l.waiters.Dec()
+		}
+		l.mu.Unlock()
+		return true
+	case <-waiter.ready:
 		return false
 	}
 }
 
 func (l *fixedCoprRequestLimiter) Release() {
-	select {
-	case <-l.tokens:
-	default:
+	if l.inflight.Add(-1) < 0 {
+		l.inflight.Inc()
 		panic("release a redundant cop request token")
+	}
+	if l.waiters.Load() == 0 {
+		return
+	}
+
+	var admitted *coprRequestWaiter
+	l.mu.Lock()
+	if l.head != nil && l.inflight.Load() < l.capacity {
+		waiter := l.head
+		l.removeWaiter(waiter)
+		l.waiters.Dec()
+		waiter.admitted = true
+		l.inflight.Inc()
+		admitted = waiter
+	}
+	l.mu.Unlock()
+	if admitted != nil {
+		close(admitted.ready)
 	}
 }
 
 func (l *fixedCoprRequestLimiter) Capacity() int {
-	return l.capacity
+	return int(l.capacity)
+}
+
+func (l *fixedCoprRequestLimiter) tryAcquireFast() bool {
+	if l.waiters.Load() > 0 {
+		return false
+	}
+	return l.tryAcquire()
+}
+
+func (l *fixedCoprRequestLimiter) tryAcquire() bool {
+	for {
+		inflight := l.inflight.Load()
+		if inflight >= l.capacity {
+			return false
+		}
+		if l.inflight.CompareAndSwap(inflight, inflight+1) {
+			return true
+		}
+	}
+}
+
+func (l *fixedCoprRequestLimiter) pushWaiter(waiter *coprRequestWaiter) {
+	waiter.queued = true
+	if l.tail == nil {
+		l.head = waiter
+		l.tail = waiter
+		return
+	}
+	waiter.prev = l.tail
+	l.tail.next = waiter
+	l.tail = waiter
+}
+
+func (l *fixedCoprRequestLimiter) removeWaiter(waiter *coprRequestWaiter) {
+	if waiter.prev != nil {
+		waiter.prev.next = waiter.next
+	} else {
+		l.head = waiter.next
+	}
+	if waiter.next != nil {
+		waiter.next.prev = waiter.prev
+	} else {
+		l.tail = waiter.prev
+	}
+	waiter.prev = nil
+	waiter.next = nil
+	waiter.queued = false
 }
 
 type compositeCoprRequestLimiter struct {
@@ -554,9 +657,16 @@ func (c *compositeCoprRequestLimiter) Release() {
 
 func (c *compositeCoprRequestLimiter) Capacity() int {
 	capacity := 0
-	for i, limiter := range c.limiters {
-		if i == 0 || limiter.Capacity() < capacity {
-			capacity = limiter.Capacity()
+	for _, limiter := range c.limiters {
+		capLimiter, ok := limiter.(interface {
+			Capacity() int
+		})
+		if !ok {
+			continue
+		}
+		c := capLimiter.Capacity()
+		if capacity == 0 || c < capacity {
+			capacity = c
 		}
 	}
 	return capacity

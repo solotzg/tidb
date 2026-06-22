@@ -39,6 +39,17 @@ import (
 	"github.com/tikv/client-go/v2/tikvrpc"
 )
 
+type coprRequestLimiterWithCapacity interface {
+	Capacity() int
+}
+
+func requireCoprRequestLimiterCapacity(t *testing.T, limiter kv.CoprRequestLimiter, expected int) {
+	t.Helper()
+	capLimiter, ok := limiter.(coprRequestLimiterWithCapacity)
+	require.True(t, ok)
+	require.Equal(t, expected, capLimiter.Capacity())
+}
+
 func TestSelectNormal(t *testing.T) {
 	response, colTypes := createSelectNormal(t, 1, 2, nil, nil)
 
@@ -108,7 +119,7 @@ func TestSelectAppliesQueryCopRequestRateLimit(t *testing.T) {
 	sctx.GetSessionVars().QueryCopRequestConcurrencyLimit = 3
 	dctx := sctx.GetDistSQLCtx()
 	require.NotNil(t, dctx.QueryCopRequestRateLimit)
-	require.Equal(t, 3, dctx.QueryCopRequestRateLimit.Capacity())
+	requireCoprRequestLimiterCapacity(t, dctx.QueryCopRequestRateLimit, 3)
 
 	colTypes := []*types.FieldType{types.NewFieldType(mysql.TypeLonglong)}
 	buildRequest := func(storeType kv.StoreType) *kv.Request {
@@ -146,7 +157,7 @@ func TestSelectAppliesQueryCopRequestRateLimit(t *testing.T) {
 	request.CoprRequestRateLimit = explicitRateLimit
 	response, err = Select(checkRequest(func(req *kv.Request) {
 		require.NotSame(t, explicitRateLimit, req.CoprRequestRateLimit)
-		require.Equal(t, 3, req.CoprRequestRateLimit.Capacity())
+		requireCoprRequestLimiterCapacity(t, req.CoprRequestRateLimit, 3)
 		require.False(t, req.CoprRequestRateLimit.Acquire(make(chan struct{})))
 		req.CoprRequestRateLimit.Release()
 	}), dctx, request, colTypes)
