@@ -2378,7 +2378,7 @@ func TestMemArbitrator(t *testing.T) {
 						GC:                    8,
 						UpdateRuntimeMemStats: 9,
 						RecordMemState:        pairSuccessFail{0, 1}}},
-				MockLogs{0, 8, 4}, // Finish the two removed pools' kill tracking.
+				MockLogs{0, 6, 4},
 			}, tMetrics)
 			require.True(t, m.avoidance.heapTracked.Load() == e1.arbitratorMu.quota+e3.arbitratorMu.quota)
 			require.Equal(t, execMetricsRisk{1, 1, NumByPriority{3, 0, 1}}, m.execMetrics.Risk)
@@ -2403,7 +2403,7 @@ func TestMemArbitrator(t *testing.T) {
 						GC:                    9,
 						UpdateRuntimeMemStats: 10,
 						RecordMemState:        pairSuccessFail{0, 1}}},
-				MockLogs{1, 10, 4}, // Finish the remaining kills, then report memory safe.
+				MockLogs{1, 6, 4}, // Report memory safe after finishing the remaining kills.
 			}, tMetrics)
 			require.True(t, !m.atMemRisk())
 		}

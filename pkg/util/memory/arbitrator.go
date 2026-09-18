@@ -75,7 +75,7 @@ const (
 	defUpdateMemConsumedTimeAlignSec          = 30
 	defUpdateMemMagnifUtimeAlign              = 30
 	defUpdateProfileTimeAlignSec              = 30
-	defRedundancy                             = 2
+	defRedundancy                      int64  = 2
 	defPoolReservedQuota                      = byteSizeMB
 	defAwaitFreePoolAllocAlignSize            = defPoolReservedQuota + byteSizeMB
 	defAwaitFreePoolShardNum           int64  = 256
@@ -575,7 +575,7 @@ type MemArbitrator struct {
 		sync.RWMutex
 		PoolAllocProfile
 		mediumQuota atomic.Int64 // medium (max quota usage of root pool)
-		timedMap    [2 + defRedundancy]struct {
+		timedMap    [1 + defRedundancy]struct {
 			sync.RWMutex
 			statisticsTimedMapElement
 		}
@@ -628,7 +628,7 @@ type MemArbitrator struct {
 
 type buffer struct {
 	size     atomic.Int64 // approximate max quota usage of root pool
-	timedMap [2 + defRedundancy]struct {
+	timedMap [1 + defRedundancy]struct {
 		sync.RWMutex
 		wrapTimeSizeQuota
 	}
@@ -870,7 +870,6 @@ func (m *MemArbitrator) UpdateDigestProfileCache(digestID uint64, memConsumed in
 	}
 
 	const maxNum = int64(len(pf.timedMap))
-	const maxDur = maxNum - defRedundancy
 
 	tsAlign := utimeSec / defUpdateProfileTimeAlignSec
 	tar := &pf.timedMap[tsAlign%maxNum]
@@ -906,10 +905,10 @@ func (m *MemArbitrator) UpdateDigestProfileCache(digestID uint64, memConsumed in
 	if updateSize {
 		maxv := tar.maxVal.Load()
 		// tsAlign-1, tsAlign
-		for i := range maxDur {
+		for i := range defRedundancy {
 			d := &pf.timedMap[(maxNum+tsAlign-i)%maxNum]
 
-			if ts := d.tsAlign.Load(); ts > tsAlign-maxDur && ts <= tsAlign {
+			if ts := d.tsAlign.Load(); ts > tsAlign-defRedundancy && ts <= tsAlign {
 				maxv = max(maxv, d.maxVal.Load())
 			}
 		}
@@ -936,7 +935,7 @@ func (m *MemArbitrator) UpdateDigestProfileCache(digestID uint64, memConsumed in
 
 type digestProfile struct {
 	maxVal   atomic.Int64
-	timedMap [2 + defRedundancy]struct {
+	timedMap [1 + defRedundancy]struct {
 		sync.RWMutex
 		wrapTimeMaxval
 	}
@@ -1016,8 +1015,6 @@ func (m *MemArbitrator) deleteUnderKill(entry *rootPoolEntry) {
 	if entry.arbitratorMu.underKill.start {
 		m.underKill.delete(entry)
 		entry.arbitratorMu.underKill.start = false
-
-		m.warnKillCancel(entry, &entry.arbitratorMu.underKill, "Finish to `KILL` root pool")
 	}
 }
 
@@ -1103,7 +1100,7 @@ func (m *MemArbitrator) recordMemConsumed(memConsumed, utimeSec int64) {
 			}
 		}
 
-		{
+		if memConsumed > 0 {
 			pos := min(memConsumed/m.poolAllocStats.PoolAllocUnit, defServerlimitMinUnitNum-1)
 			atomic.AddUint32(&tar.slot[pos], 1)
 			tar.num.Add(1)
@@ -1126,7 +1123,6 @@ func (m *MemArbitrator) recordMemConsumed(memConsumed, utimeSec int64) {
 
 func (m *MemArbitrator) tryToUpdateBuffer(memConsumed, utimeSec int64) {
 	const maxNum = int64(len(m.buffer.timedMap))
-	const maxDur = maxNum - defRedundancy
 
 	if m.workMode() != ArbitratorModePriority {
 		return
@@ -1166,10 +1162,10 @@ func (m *MemArbitrator) tryToUpdateBuffer(memConsumed, utimeSec int64) {
 
 		if updateSize {
 			// tsAlign-1, tsAlign
-			for i := range maxDur {
+			for i := range defRedundancy {
 				d := &m.buffer.timedMap[(maxNum+tsAlign-i)%maxNum]
 
-				if ts := d.ts.Load(); ts > tsAlign-maxDur && ts <= tsAlign {
+				if ts := d.ts.Load(); ts > tsAlign-defRedundancy && ts <= tsAlign {
 					memConsumed = max(memConsumed, d.size.Load(), 0)
 				}
 			}
@@ -1257,17 +1253,6 @@ func (m *MemArbitrator) resetRootPoolEntry(entry *rootPoolEntry) bool {
 	}
 
 	return true
-}
-
-func (m *MemArbitrator) warnKillCancel(entry *rootPoolEntry, ctx *entryKillCancelCtx, reason string) {
-	m.actions.Warn(
-		reason,
-		zap.Uint64("uid", entry.pool.uid),
-		zap.String("name", entry.pool.name),
-		zap.String("mem-priority", entry.ctx.memPriority.String()),
-		zap.Int64("reclaimed", ctx.reclaim),
-		zap.Time("start-time", ctx.startTime),
-	)
 }
 
 // RemoveRootPoolByID removes & terminates the root pool by ID
@@ -2292,10 +2277,10 @@ func (m *MemArbitrator) wake() {
 }
 
 func (m *MemArbitrator) updatePoolMediumCapacity(utimeMilli int64) {
+	m.recordMemConsumed(0, m.approxUnixTimeSec())
+
 	s := &m.poolAllocStats
 	const maxNum = int64(len(s.timedMap))
-	const maxDur = maxNum - defRedundancy
-
 	{
 		s.RLock()
 
@@ -2303,10 +2288,10 @@ func (m *MemArbitrator) updatePoolMediumCapacity(utimeMilli int64) {
 		tar1 := &s.timedMap[(maxNum+tsAlign-1)%maxNum]
 		tar2 := &s.timedMap[tsAlign%maxNum]
 
-		if ts := tar1.tsAlign.Load(); ts <= tsAlign-maxDur || ts > tsAlign {
+		if ts := tar1.tsAlign.Load(); ts <= tsAlign-defRedundancy || ts > tsAlign {
 			tar1 = nil
 		}
-		if ts := tar2.tsAlign.Load(); ts <= tsAlign-maxDur || ts > tsAlign {
+		if ts := tar2.tsAlign.Load(); ts <= tsAlign-defRedundancy || ts > tsAlign {
 			tar2 = nil
 		}
 
@@ -2327,10 +2312,10 @@ func (m *MemArbitrator) updatePoolMediumCapacity(utimeMilli int64) {
 
 			for i := range defServerlimitMinUnitNum {
 				if tar1 != nil {
-					cnt += uint64(tar1.slot[i])
+					cnt += uint64(atomic.LoadUint32(&tar1.slot[i]))
 				}
 				if tar2 != nil {
-					cnt += uint64(tar2.slot[i])
+					cnt += uint64(atomic.LoadUint32(&tar2.slot[i]))
 				}
 				if cnt >= expect {
 					index = i
