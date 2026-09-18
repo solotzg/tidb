@@ -28,6 +28,7 @@ import (
 	"github.com/pingcap/tidb/pkg/metrics"
 	"github.com/pingcap/tidb/pkg/util/intest"
 	"github.com/pingcap/tidb/pkg/util/logutil"
+	"go.uber.org/zap"
 )
 
 const (
@@ -348,11 +349,13 @@ func SetupGlobalMemArbitratorForTest(baseDir string) {
 			defPoolQuotaShards,
 			newMemStateRecorder(baseDir),
 		)
+		// Skip logWithDebugFields and wrapDebugFieldsLogAction when reporting callers.
+		logger := logutil.BgLogger().WithOptions(zap.AddCallerSkip(2))
 		m.AutoRun(
 			MemArbitratorActions{
-				Info:  logutil.BgLogger().Info,
-				Warn:  logutil.BgLogger().Warn,
-				Error: logutil.BgLogger().Error,
+				Info:  wrapDebugFieldsLogAction(logger.Info),
+				Warn:  wrapDebugFieldsLogAction(logger.Warn),
+				Error: wrapDebugFieldsLogAction(logger.Error),
 				UpdateRuntimeMemStats: func() {
 				},
 				GC: func() {
@@ -502,12 +505,14 @@ func initGlobalMemArbitrator() (m *MemArbitrator) {
 		defPoolQuotaShards,
 		newMemStateRecorder(baseDir),
 	)
+	// Skip logWithDebugFields and wrapDebugFieldsLogAction when reporting callers.
+	logger := logutil.BgLogger().WithOptions(zap.AddCallerSkip(2))
 
 	m.AutoRun(
 		MemArbitratorActions{
-			Info:  logutil.BgLogger().Info,
-			Warn:  logutil.BgLogger().Warn,
-			Error: logutil.BgLogger().Error,
+			Info:  wrapDebugFieldsLogAction(logger.Info),
+			Warn:  wrapDebugFieldsLogAction(logger.Warn),
+			Error: wrapDebugFieldsLogAction(logger.Error),
 			UpdateRuntimeMemStats: func() {
 				m.setRuntimeMemStats(readRuntimeMemStats())
 			},

@@ -649,7 +649,8 @@ type digestProfileShard struct {
 
 // MemArbitratorActions represents the actions of the mem-arbitrator
 type MemArbitratorActions struct {
-	Info, Warn, Error func(format string, args ...zap.Field) // log actions
+	// Log actions must consume fields synchronously and must not retain them after returning.
+	Info, Warn, Error func(fields *LogFields) // log actions
 
 	UpdateRuntimeMemStats func() // update runtime memory statistics
 	GC                    func() // garbage collection
@@ -1563,7 +1564,8 @@ func (m *MemArbitrator) doReclaimMemByPriority(target *rootPoolEntry, remainByte
 				continue
 			}
 			if deadline := ctx.startTime.Add(defKillCancelCheckTimeout); now.Compare(deadline) >= 0 {
-				m.actions.Warn("Failed to `CANCEL` root pool due to timeout",
+				fields := acquireDebugFields()
+				fields.append(
 					zap.Uint64("uid", uid),
 					zap.String("name", entry.pool.name),
 					zap.Int64("quota-to-reclaim", ctx.reclaim),
@@ -1571,6 +1573,7 @@ func (m *MemArbitrator) doReclaimMemByPriority(target *rootPoolEntry, remainByte
 					zap.Time("start-time", ctx.startTime),
 					zap.Time("deadline", deadline),
 				)
+				logWithDebugFields(m.actions.Warn, "Failed to `CANCEL` root pool due to timeout", fields)
 				ctx.fail = true
 				continue
 			}
@@ -1715,7 +1718,7 @@ func NewMemArbitrator(limit int64, shardNum uint64, maxQuotaShardNum int, record
 	m.underKill.init()
 	m.underCancel.init()
 	{
-		f := func(string, ...zap.Field) {}
+		f := func(*LogFields) {}
 		m.actions.Info = f
 		m.actions.Warn = f
 		m.actions.Error = f
@@ -2068,10 +2071,42 @@ func (m *MemArbitrator) RestartEntryByContext(entry rootPoolWrap, ctx *Arbitrati
 	return true
 }
 
-// DebugFields is used to store debug fields for logging
-type DebugFields struct {
+// LogFields stores a log message and its structured fields.
+type LogFields struct {
+	msg    string
 	fields [30]zap.Field
 	n      int
+}
+
+var debugFieldsPool = sync.Pool{
+	New: func() any {
+		return new(LogFields)
+	},
+}
+
+func acquireDebugFields() *LogFields {
+	fields := debugFieldsPool.Get().(*LogFields)
+	fields.n = 0
+	return fields
+}
+
+func releaseDebugFields(fields *LogFields) {
+	clear(fields.fields[:fields.n])
+	fields.msg = ""
+	fields.n = 0
+	debugFieldsPool.Put(fields)
+}
+
+func logWithDebugFields(action func(*LogFields), msg string, fields *LogFields) {
+	defer releaseDebugFields(fields)
+	fields.msg = msg
+	action(fields)
+}
+
+func wrapDebugFieldsLogAction(logFn func(string, ...zap.Field)) func(*LogFields) {
+	return func(fields *LogFields) {
+		logFn(fields.msg, fields.fields[:fields.n]...)
+	}
 }
 
 // ConcurrentBudget represents a wrapped budget of the resource pool for concurrent usage
@@ -2420,10 +2455,12 @@ func (m *MemArbitrator) updateMemMagnification(utimeMilli int64) (updatedPreProf
 		}
 
 		if updated {
-			m.actions.Info("Update mem quota magnification ratio",
+			fields := acquireDebugFields()
+			fields.append(
 				zap.Int64("ori-ratio(‰)", oriRatio),
 				zap.Int64("new-ratio(‰)", newRatio),
 			)
+			logWithDebugFields(m.actions.Info, "Update mem quota magnification ratio", fields)
 
 			if lastMemState := m.lastMemState(); lastMemState != nil && newRatio < lastMemState.Magnif {
 				_ = m.persistRuntimeMemState("new magnification ratio", nil)
@@ -2502,9 +2539,7 @@ func (m *MemArbitrator) executeTick(utimeMilli int64) bool { // exec batch tasks
 			zap.Int64("last-magnification-ratio(‰)", pre.ratio),
 			zap.Time("last-prof-start-time", time.UnixMilli(pre.startUtimeMilli)),
 		)
-		m.actions.Info("Mem profile timeline",
-			profile.fields[:profile.n]...,
-		)
+		logWithDebugFields(m.actions.Info, "Mem profile timeline", profile)
 	}
 	// suggest pool cap
 	m.updatePoolMediumCapacity(utimeMilli)
@@ -2513,7 +2548,7 @@ func (m *MemArbitrator) executeTick(utimeMilli int64) bool { // exec batch tasks
 	return true
 }
 
-func (d *DebugFields) append(f ...zap.Field) {
+func (d *LogFields) append(f ...zap.Field) {
 	n := min(len(f), len(d.fields)-d.n)
 	for i := range n {
 		d.fields[d.n] = f[i]
@@ -2521,7 +2556,8 @@ func (d *DebugFields) append(f ...zap.Field) {
 	}
 }
 
-func (m *MemArbitrator) recordDebugProfile() (f DebugFields) {
+func (m *MemArbitrator) recordDebugProfile() *LogFields {
+	f := acquireDebugFields()
 	taskNumByMode := m.TaskNumByPattern()
 	memMagnif := m.memMagnif()
 	if memMagnif == 0 {
@@ -2552,7 +2588,7 @@ func (m *MemArbitrator) recordDebugProfile() (f DebugFields) {
 	if t := m.heapController.memRisk.startTime.unixMilli.Load(); t != 0 {
 		f.append(zap.Time("mem-risk-start", time.UnixMilli(t)))
 	}
-	return
+	return f
 }
 
 type memStats struct {
@@ -2718,7 +2754,7 @@ func (m *MemArbitrator) handleMemIssues() (isSafe bool) {
 
 			{ // warning
 				profile := m.recordDebugProfile()
-				m.actions.Info("Memory is safe", profile.fields[:profile.n]...)
+				logWithDebugFields(m.actions.Info, "Memory is safe", profile)
 			}
 			m.setMemSafe()
 			return true
@@ -2765,7 +2801,7 @@ func (m *MemArbitrator) handleMemRisk(gcExecuted bool) {
 		profile.append(
 			zap.Int64("quota-to-reclaim", max(0, memToReclaim)),
 		)
-		m.actions.Warn("`OOM RISK`: try to `KILL` running root pool", profile.fields[:profile.n]...)
+		logWithDebugFields(m.actions.Warn, "`OOM RISK`: try to `KILL` running root pool", profile)
 	}
 	m.killTopnEntry(memToReclaim)
 	if !gcExecuted {
@@ -2782,7 +2818,8 @@ func (m *MemArbitrator) killTopnEntry(required int64) (newKillNum int, reclaimed
 				continue
 			}
 			if deadline := ctx.startTime.Add(defKillCancelCheckTimeout); now.Compare(deadline) >= 0 {
-				m.actions.Error("Failed to `KILL` root pool due to timeout",
+				fields := acquireDebugFields()
+				fields.append(
 					zap.Uint64("uid", entry.pool.uid),
 					zap.String("name", entry.pool.name),
 					zap.Int64("mem-to-reclaim", ctx.reclaim),
@@ -2790,6 +2827,7 @@ func (m *MemArbitrator) killTopnEntry(required int64) (newKillNum int, reclaimed
 					zap.Time("start-time", ctx.startTime),
 					zap.Time("deadline", deadline),
 				)
+				logWithDebugFields(m.actions.Error, "Failed to `KILL` root pool due to timeout", fields)
 				ctx.fail = true
 				continue
 			}
@@ -2821,12 +2859,15 @@ func (m *MemArbitrator) killTopnEntry(required int64) (newKillNum int, reclaimed
 					m.execMetrics.Risk.OOMKill[prio]++
 
 					{ // warning
-						m.actions.Warn("Start to `KILL` root pool",
+						fields := acquireDebugFields()
+						fields.append(
 							zap.Uint64("uid", entry.pool.uid),
 							zap.String("name", entry.pool.name),
 							zap.Int64("mem-used", memoryUsed),
 							zap.String("mem-priority", ctx.memPriority.String()),
-							zap.Int64("rest-to-reclaim", max(0, required-reclaimed)))
+							zap.Int64("rest-to-reclaim", max(0, required-reclaimed)),
+						)
+						logWithDebugFields(m.actions.Warn, "Start to `KILL` root pool", fields)
 					}
 					if m.removeTask(entry) {
 						entry.windUp(0, ArbitrateFail)
@@ -2889,10 +2930,12 @@ func (m *MemArbitrator) persistRuntimeMemState(reason string, mutate func(*Runti
 	m.heapController.memStateRecorder.lastMemState.Store(&memState)
 	m.heapController.memStateRecorder.lastRecordUtimeMilli.Store(nowUnixMilli())
 	m.execMetrics.Action.RecordMemState.Succ++
-	m.actions.Info("Record mem state",
+	fields := acquireDebugFields()
+	fields.append(
 		zap.String("reason", reason),
 		zap.String("data", fmt.Sprintf("%+v", memState)),
 	)
+	logWithDebugFields(m.actions.Info, "Record mem state", fields)
 	return nil
 }
 
@@ -3131,7 +3174,7 @@ func (m *MemArbitrator) intoMemRisk() {
 	{
 		profile := m.recordDebugProfile()
 		profile.append(zap.Int64("threshold", m.mu.threshold.oomRisk))
-		m.actions.Warn("Memory inuse reach threshold", profile.fields[:profile.n]...)
+		logWithDebugFields(m.actions.Warn, "Memory inuse reach threshold", profile)
 	}
 
 	{ // GC
@@ -3154,7 +3197,9 @@ func (m *MemArbitrator) intoMemRisk() {
 			s.LastRisk = lastRisk
 			s.Magnif = magnif
 		}); err != nil {
-			m.actions.Error("Failed to save mem-risk", zap.Error(err))
+			fields := acquireDebugFields()
+			fields.append(zap.Error(err))
+			logWithDebugFields(m.actions.Error, "Failed to save mem-risk", fields)
 		}
 	}
 

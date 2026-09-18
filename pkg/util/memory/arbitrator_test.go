@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 const (
@@ -1205,9 +1204,9 @@ func TestMemArbitratorSoftRiskWithoutRunningPool(t *testing.T) {
 	}
 	stats := memStats{HeapAlloc: 900, HeapInuse: 960}
 	m.actions = MemArbitratorActions{
-		Info:  func(string, ...zap.Field) {},
-		Warn:  func(string, ...zap.Field) {},
-		Error: func(string, ...zap.Field) {},
+		Info:  func(*LogFields) {},
+		Warn:  func(*LogFields) {},
+		Error: func(*LogFields) {},
 		UpdateRuntimeMemStats: func() {
 			m.setRuntimeMemStats(stats)
 		},
@@ -1229,9 +1228,9 @@ func TestMemArbitratorSoftRiskWithoutRunningPool(t *testing.T) {
 
 	hardRisk := newMemArbitratorForTest(1, 1000)
 	hardRisk.actions = MemArbitratorActions{
-		Info:  func(string, ...zap.Field) {},
-		Warn:  func(string, ...zap.Field) {},
-		Error: func(string, ...zap.Field) {},
+		Info:  func(*LogFields) {},
+		Warn:  func(*LogFields) {},
+		Error: func(*LogFields) {},
 		UpdateRuntimeMemStats: func() {
 			hardRisk.setRuntimeMemStats(stats)
 		},
@@ -2094,13 +2093,13 @@ func TestMemArbitrator(t *testing.T) {
 		m.actions.GC = func() {
 			tMetrics.Action.GC++
 		}
-		m.actions.Error = func(format string, args ...zap.Field) {
+		m.actions.Error = func(args *LogFields) {
 			tMetrics.logs.error++
 		}
-		m.actions.Warn = func(format string, args ...zap.Field) {
+		m.actions.Warn = func(args *LogFields) {
 			tMetrics.logs.warn++
 		}
-		m.actions.Info = func(format string, args ...zap.Field) {
+		m.actions.Info = func(args *LogFields) {
 			tMetrics.logs.info++
 		}
 
@@ -2443,13 +2442,13 @@ func TestMemArbitrator(t *testing.T) {
 
 		logs := MockLogs{}
 
-		m.actions.Error = func(format string, args ...zap.Field) {
+		m.actions.Error = func(args *LogFields) {
 			logs.error++
 		}
-		m.actions.Warn = func(format string, args ...zap.Field) {
+		m.actions.Warn = func(args *LogFields) {
 			logs.warn++
 		}
-		m.actions.Info = func(format string, args ...zap.Field) {
+		m.actions.Info = func(args *LogFields) {
 			logs.info++
 		}
 
@@ -2744,11 +2743,11 @@ func TestMemArbitrator(t *testing.T) {
 		}
 		m.actions.GC = func() {
 		}
-		m.actions.Error = func(format string, args ...zap.Field) {
+		m.actions.Error = func(args *LogFields) {
 		}
-		m.actions.Warn = func(format string, args ...zap.Field) {
+		m.actions.Warn = func(args *LogFields) {
 		}
-		m.actions.Info = func(format string, args ...zap.Field) {
+		m.actions.Info = func(args *LogFields) {
 		}
 		e1 := m.addEntryForTest(m.newCtxWithHelperForTest(ArbitrationPriorityMedium, NoWaitAverse, RequirePrivilege))
 		e1.ctx.Load().arbitrateHelper.(*arbitrateHelperForTest).heapUsedCB = func() int64 {
