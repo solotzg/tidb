@@ -2073,8 +2073,8 @@ func (m *MemArbitrator) RestartEntryByContext(entry rootPoolWrap, ctx *Arbitrati
 
 // LogFields stores a log message and its structured fields.
 type LogFields struct {
-	msg    string
 	fields [30]zap.Field
+	msg    string
 	n      int
 }
 
