@@ -48,6 +48,7 @@ type builtinFtsMatchWordSig struct {
 
 type ftsMysqlMatchAgainstFunctionClass struct {
 	baseFunctionClass
+	expropt.SessionVarsPropReader
 }
 
 type builtinFtsMysqlMatchAgainstSig struct {
@@ -129,6 +130,16 @@ func SetFTSMysqlMatchAgainstModifier(sf *ScalarFunction, modifier ast.FulltextSe
 	}
 	sig.SetModifier(modifier)
 	return nil
+}
+
+// GetFTSMysqlMatchAgainstModifier returns the modifier attached to the
+// internal `MATCH ... AGAINST` builtin signature.
+func GetFTSMysqlMatchAgainstModifier(sf *ScalarFunction) (ast.FulltextSearchModifier, bool) {
+	sig, ok := sf.Function.(*builtinFtsMysqlMatchAgainstSig)
+	if !ok {
+		return ast.FulltextSearchModifierNaturalLanguageMode, false
+	}
+	return sig.modifier, true
 }
 
 // SetFTSMysqlMatchAgainstLocalEvalInfo attaches planner-validated local
@@ -269,6 +280,12 @@ func (c *ftsMysqlMatchAgainstFunctionClass) getFunction(ctx BuildContext, args [
 	if err != nil {
 		return nil, err
 	}
+
+	sessionVars, err := c.GetSessionVars(ctx.GetEvalCtx())
+	if err != nil {
+		return nil, err
+	}
+	sessionVars.StmtCtx.FTSFunctionIsUsed = true
 
 	sig := &builtinFtsMysqlMatchAgainstSig{baseBuiltinFunc: bf}
 	sig.setPbCode(tipb.ScalarFuncSig_FTSMatchExpression)

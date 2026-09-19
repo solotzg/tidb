@@ -36,7 +36,7 @@ func TestFTSModifierAllowsNativePushdown(t *testing.T) {
 		{
 			name:     "boolean mode",
 			modifier: ast.FulltextSearchModifier(ast.FulltextSearchModifierBooleanMode),
-			expected: false,
+			expected: true,
 		},
 		{
 			name:     "natural language mode with query expansion",

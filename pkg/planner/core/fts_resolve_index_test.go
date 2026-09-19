@@ -15,6 +15,7 @@
 package core_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -124,6 +125,18 @@ func TestTiFlashFTSMatchWordDirtyTxn(t *testing.T) {
 		tk.MustExec("insert into fts_t values (1, 'hello', 'dirty')")
 		tk.MustContainErrMsg("select * from fts_t where fts_match_word('hello', title)", "FTS_MATCH_WORD() cannot be used in a transaction with uncommitted changes")
 		tk.MustExec("rollback")
+	})
+}
+
+func TestTiFlashFTSMatchAgainstBooleanPushDown(t *testing.T) {
+	setStarterDeployModeForFTSTest(t)
+
+	testkit.RunTestUnderCascadesAndDomainWithSchemaLease(t, 600*time.Millisecond, []mockstore.MockTiKVStoreOption{mockstore.WithMockTiFlash(2)}, func(t *testing.T, tk *testkit.TestKit, dom *domain.Domain, _, _ string) {
+		setupTiFlashFTSMatchWordTable(t, tk, dom)
+		tk.MustExec("set @@tidb_enable_local_match_against = 0")
+
+		plan := testdata.ConvertRowsToStrings(tk.MustQuery("explain format = 'plan_tree' select * from fts_t where match(title) against('+hello -world' in boolean mode)").Rows())
+		require.Contains(t, strings.Join(plan, "\n"), "ftsIndex:+hello -world IN test.fts_t.title")
 	})
 }
 

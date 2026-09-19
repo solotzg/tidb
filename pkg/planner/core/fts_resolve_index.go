@@ -77,7 +77,7 @@ func (v *FullTextIndexPlanVisitor) visit(plan base.LogicalPlan) (bool, error) {
 	return changed, nil
 }
 
-// FullTextIndexResolverWhere resolves FTS_MATCH_WORD() predicates and pushes
+// FullTextIndexResolverWhere resolves native full-text predicates and pushes
 // them down to TiFlash table scans. It must run before predicate pushdown.
 type FullTextIndexResolverWhere struct{}
 
@@ -107,10 +107,12 @@ func (*FullTextIndexResolverWhere) onEnterDataSource(v *FullTextIndexPlanVisitor
 	}
 
 	var ftsInfo *expression.FTSInfo
+	var ftsExpr expression.Expression
 	newConds := make([]expression.Expression, 0, len(planSelection.Conditions)-1)
 	for idx, expr := range planSelection.Conditions {
 		ftsInfo = expression.InterpretFullTextSearchExpr(expr)
 		if ftsInfo != nil {
+			ftsExpr = expr
 			newConds = append(newConds, planSelection.Conditions[:idx]...)
 			newConds = append(newConds, planSelection.Conditions[idx+1:]...)
 			break
@@ -119,36 +121,60 @@ func (*FullTextIndexResolverWhere) onEnterDataSource(v *FullTextIndexPlanVisitor
 	if ftsInfo == nil {
 		return false, nil
 	}
+	if ftsInfo.IsMatchAgainst {
+		if sf, ok := ftsExpr.(*expression.ScalarFunction); ok {
+			if _, local := expression.FTSMysqlMatchAgainstLocalEvalInfo(sf); local {
+				// The planner deliberately selected TiDB's local BOOLEAN MODE
+				// evaluator. It must remain in the selection and must not be
+				// converted into a storage-index request.
+				return false, nil
+			}
+		}
+	}
 
 	matchingIndex := findMatchingFullTextIndex(ds, ftsInfo)
 	if matchingIndex == nil {
 		return false, plannererrors.ErrWrongUsage.FastGen("Full text search can only be used with a matching fulltext index")
 	}
 
+	queryInfo := &tipb.FTSQueryInfo{
+		QueryType:      tipb.FTSQueryType_FTSQueryTypeNoScore,
+		IndexId:        matchingIndex.ID,
+		QueryText:      ftsInfo.Query,
+		QueryTokenizer: string(matchingIndex.FullTextInfo.ParserType),
+		TopK:           uint32Ptr(maxFTSTopK),
+		QueryFunc:      tipb.ScalarFuncSig_FTSMatchWord,
+	}
+	for _, column := range ftsInfo.Columns {
+		queryInfo.Columns = append(queryInfo.Columns, tidbutil.ColumnToProto(column.ToInfo(), false, false))
+		queryInfo.ColumnNames = append(queryInfo.ColumnNames, column.OrigName)
+	}
+	if ftsInfo.IsMatchAgainst {
+		booleanQuery, err := expression.BuildFTSBooleanQuery(ftsInfo.Query, matchingIndex.FullTextInfo.ParserType)
+		if err != nil {
+			return false, plannererrors.ErrWrongUsage.FastGen("unsupported BOOLEAN MODE full-text query: %s", err)
+		}
+		queryInfo.QueryFunc = tipb.ScalarFuncSig_FTSMatchExpression
+		queryInfo.BooleanQuery = booleanQuery
+	}
+
 	ds.FtsPushDown = &logicalop.FTSPushDown{
 		IndexInfo: matchingIndex,
-		QueryInfo: &tipb.FTSQueryInfo{
-			QueryType:      tipb.FTSQueryType_FTSQueryTypeNoScore,
-			IndexId:        matchingIndex.ID,
-			Columns:        []*tipb.ColumnInfo{tidbutil.ColumnToProto(ftsInfo.Column.ToInfo(), false, false)},
-			ColumnNames:    []string{ftsInfo.Column.OrigName},
-			QueryText:      ftsInfo.Query,
-			QueryTokenizer: string(matchingIndex.FullTextInfo.ParserType),
-			TopK:           uint32Ptr(maxFTSTopK),
-			QueryFunc:      tipb.ScalarFuncSig_FTSMatchWord,
-		},
+		QueryInfo: queryInfo,
 	}
-	ds.Columns = append(ds.Columns, &model.ColumnInfo{
-		Name:      ast.NewCIStr("_FTS_SCORE"),
-		ID:        model.VirtualColFTSScoreID,
-		FieldType: ftsScoreType,
-	})
-	ds.Schema().Append(&expression.Column{
-		UniqueID: ds.SCtx().GetSessionVars().AllocPlanColumnID(),
-		ID:       model.VirtualColFTSScoreID,
-		RetType:  ftsScoreType.Clone(),
-		OrigName: "_FTS_SCORE",
-	})
+	if !ftsInfo.IsMatchAgainst {
+		ds.Columns = append(ds.Columns, &model.ColumnInfo{
+			Name:      ast.NewCIStr("_FTS_SCORE"),
+			ID:        model.VirtualColFTSScoreID,
+			FieldType: ftsScoreType,
+		})
+		ds.Schema().Append(&expression.Column{
+			UniqueID: ds.SCtx().GetSessionVars().AllocPlanColumnID(),
+			ID:       model.VirtualColFTSScoreID,
+			RetType:  ftsScoreType.Clone(),
+			OrigName: "_FTS_SCORE",
+		})
+	}
 
 	planSelection.Conditions = newConds
 	if len(planSelection.Conditions) == 0 {
@@ -158,12 +184,27 @@ func (*FullTextIndexResolverWhere) onEnterDataSource(v *FullTextIndexPlanVisitor
 }
 
 func findMatchingFullTextIndex(ds *logicalop.DataSource, ftsInfo *expression.FTSInfo) *model.IndexInfo {
+	if ftsInfo.IsMatchAgainst && len(ftsInfo.Columns) != 1 {
+		// The TiFlash table-scan protocol carries one physical FTS index per
+		// scan. Until TiDB has a multi-column index representation, keep
+		// multi-column MATCH local rather than risking false negatives from
+		// choosing only the first column's index.
+		return nil
+	}
 	for _, idx := range ds.TableInfo.Indices {
 		if idx.FullTextInfo == nil || !idx.IsPublic() || len(idx.Columns) != 1 {
 			continue
 		}
-		if ds.TableInfo.Columns[idx.Columns[0].Offset].ID == ftsInfo.Column.ID {
-			return idx
+		if idx.Columns[0].Offset < 0 || idx.Columns[0].Offset >= len(ds.TableInfo.Columns) {
+			continue
+		}
+		for _, column := range ftsInfo.Columns {
+			if ds.TableInfo.Columns[idx.Columns[0].Offset].ID == column.ID {
+				if ftsInfo.IsMatchAgainst && idx.FullTextInfo.ParserType != model.FullTextParserTypeStandardV1 {
+					return nil
+				}
+				return idx
+			}
 		}
 	}
 	return nil
@@ -244,7 +285,7 @@ func (*FullTextIndexResolverTopN) onEnterDataSource(v *FullTextIndexPlanVisitor,
 	}
 
 	orderByInfo := expression.InterpretFullTextSearchExpr(planTopN.ByItems[0].Expr)
-	if orderByInfo == nil {
+	if orderByInfo == nil || orderByInfo.IsMatchAgainst {
 		return false, nil
 	}
 	queryInfo := ds.FtsPushDown.QueryInfo
@@ -328,7 +369,7 @@ func (*FullTextIndexResolverProjection) onEnterDataSource(v *FullTextIndexPlanVi
 	matchedProjections := make([]int, 0, len(planProjection.Exprs))
 	for i, expr := range planProjection.Exprs {
 		ftsInfo := expression.InterpretFullTextSearchExpr(expr)
-		if ftsInfo == nil {
+		if ftsInfo == nil || ftsInfo.IsMatchAgainst {
 			continue
 		}
 		if ftsInfo.Column.ID != queryInfo.Columns[0].ColumnId {

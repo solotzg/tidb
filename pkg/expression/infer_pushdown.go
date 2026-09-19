@@ -453,15 +453,11 @@ func scalarExprSupportedByFlash(ctx EvalContext, function *ScalarFunction) bool 
 	case ast.FTSMatchWord:
 		return true
 	case ast.FTSMysqlMatchAgainst:
-		// The tipb pushdown protocol (see distsql_builtin.go) does not
-		// serialize the FTS modifier; TiFlash defaults to natural-language
-		// mode on the reconstructed signature. Pushing a Boolean-mode or
-		// WITH QUERY EXPANSION call down would therefore silently execute
-		// with the modifier dropped. Mark such calls as not Flash-supported
-		// here as a defense in depth — the planner's modifier guard in
-		// matchAgainstToBuiltin already rejects them at plan time, but
-		// keeping pushdown self-consistent guards against any future code
-		// path that builds an FTSMysqlMatchAgainst around the planner.
+		// The scalar function encoding does not serialize the FTS modifier.
+		// Boolean-mode native pushdown is handled by the dedicated FTSQueryInfo
+		// table-scan path, where the parsed boolean query is carried separately.
+		// Keep an unqualified scalar MATCH expression natural-language-only as a
+		// defense in depth against modifier loss.
 		//
 		// A call carrying local evaluation metadata is additionally excluded:
 		// only TiDB can evaluate it, and its 0/1 result is not the relevance

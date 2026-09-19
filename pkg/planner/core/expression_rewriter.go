@@ -2445,12 +2445,12 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 	// AlternativeLogicalPlanFTSLikeFallback to true and re-runs the build
 	// only when round 1 reported a direct-boolean-context MATCH that the
 	// native builtin cannot serve (no FTS index on a TiFlash replica /
-	// modifier not pushdown-supported). In that second pass the rewriter
-	// emits ILIKE for direct-boolean-context MATCH only — scoring contexts
-	// (SELECT field list / ORDER BY) and scalar predicate positions
-	// (IS NULL, comparisons, CASE, arithmetic) need the float relevance
-	// score, so they keep using the native builtin and will error at
-	// execution if no FTS index exists there.
+	// unsupported parser or analyzer configuration). In that second pass the
+	// rewriter emits ILIKE for direct-boolean-context MATCH only — scoring
+	// contexts (SELECT field list / ORDER BY) and scalar predicate positions
+	// (IS NULL, comparisons, CASE, arithmetic) need the float relevance score,
+	// so they keep using the native builtin and will error at execution if no
+	// FTS index exists there.
 	//
 	// "Direct boolean context" requires that every ancestor up to the
 	// WHERE/HAVING/ON root is AND/OR/NOT/parens — see inDirectMatchBooleanContext.
@@ -2459,13 +2459,12 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 	// etc. would silently produce wrong rows if the LIKE rewrite's integer
 	// result were substituted for the native float score.
 	//
-	// Round 1 also has to record viability before committing to native: if
-	// any boolean-context MATCH is non-viable, the resulting plan would
-	// fail at execution. The rewriter records that on the planBuilder so the
-	// round driver can invalidate the plan and trigger the fallback round.
-	// Round 1 additionally records that a direct-boolean-context MATCH was
-	// seen so the driver runs the LIKE round for cost competition even when
-	// round 1's native plan is executable.
+	// Round 1 records viability before committing to native: if any
+	// boolean-context MATCH is non-viable, the resulting plan would fail at
+	// execution. The rewriter records that on the planBuilder so the round
+	// driver can invalidate the plan and trigger the fallback round. A
+	// natively executable BOOLEAN MODE query is not rewritten to ILIKE: that
+	// would lose phrase, prefix, stopword and word-boundary semantics.
 	useLikeFallback := false
 	useLocalMatch := false
 	if er.planCtx != nil && er.planCtx.builder != nil && er.planCtx.builder.ctx != nil {
@@ -2479,25 +2478,21 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 			// EXPLORE can enumerate the enabled state from its default OFF.
 			if expression.FTSModifierSupportedByLocalNoScore(v.Modifier) {
 				sessVars.RecordRelevantOptVar(vardef.TiDBEnableLocalMatchAgainst)
-				if sessVars.EnableLocalMatchAgainst {
+				nativeViable := er.ftsNativeViable(v.Modifier, numCols, stackLen)
+				if sessVars.EnableLocalMatchAgainst && !nativeViable {
 					useLocalMatch = true
 				}
-			}
-			// The alternative-round bookkeeping below is skipped when local
-			// evaluation is taking the MATCH: it is always executable, so there
-			// is no non-viable native plan for the driver to rescue.
-			if !useLocalMatch && sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback {
-				// fts-like-fallback round: boolean-context MATCH rewrites to ILIKE.
-				useLikeFallback = true
-			} else if !useLocalMatch && sessVars.EnableAlternativeLogicalPlans {
-				// Round 1 (native). Mark the build so the driver runs the LIKE
-				// round and cost-compares its plan against round 1's. If this
-				// MATCH cannot run natively, also mark the build as non-viable
-				// so the driver discards round 1's plan; the rewrite continues
-				// with the native builtin to keep round 1 internally consistent.
-				er.planCtx.builder.MarkPredicateMatch()
-				if !er.ftsNativeViable(v.Modifier, numCols, stackLen) {
-					er.planCtx.builder.MarkNonViableFTSMatch()
+				if !useLocalMatch && !nativeViable {
+					if sessVars.StmtCtx.AlternativeLogicalPlanFTSLikeFallback {
+						// fts-like-fallback round: boolean-context MATCH rewrites
+						// to ILIKE only when the native Boolean path is unavailable.
+						useLikeFallback = true
+					} else if sessVars.EnableAlternativeLogicalPlans {
+						// Round 1 (native) is non-viable. The round driver will
+						// rebuild this predicate using the fallback route.
+						er.planCtx.builder.MarkPredicateMatch()
+						er.planCtx.builder.MarkNonViableFTSMatch()
+					}
 				}
 			}
 		}
@@ -2589,14 +2584,15 @@ func (er *expressionRewriter) matchAgainstToLocalBuiltin(v *ast.MatchAgainst, nu
 //   - the originating table has an available TiFlash replica;
 //   - the column is covered by a public FULLTEXT index on that table.
 //
-// In addition, the modifier must be the default natural-language mode. Boolean
-// mode and WITH QUERY EXPANSION are not encoded in the tipb pushdown today
-// (only ScalarFuncSig_FTSMatchExpression is emitted regardless of modifier),
-// so a native plan that wins on cost would execute on TiFlash with the modifier
-// silently dropped. Until the modifier is carried in the pushdown protocol, we
-// treat those modifiers as non-viable for native pushdown.
+// In addition, BOOLEAN MODE requires the STANDARD parser and TiDB's default
+// analyzer settings because those are the only settings represented by the
+// current TiFlash protocol. Natural-language mode retains its existing native
+// viability rules; query expansion is not part of this feature.
 func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifier, numCols, stackLen int) bool {
 	if numCols <= 0 {
+		return false
+	}
+	if modifier.IsBooleanMode() && numCols != 1 {
 		return false
 	}
 	if !ftsModifierAllowsNativePushdown(modifier) {
@@ -2604,7 +2600,13 @@ func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifie
 	}
 	builder := er.planCtx.builder
 	sessVars := builder.ctx.GetSessionVars()
+	if modifier.IsBooleanMode() && !ftsNativeAnalyzerConfigSupported(sessVars) {
+		return false
+	}
 	nameStart := stackLen - numCols - 1
+	if nameStart < 0 || stackLen > len(er.ctxNameStk) || stackLen > len(er.ctxStack) {
+		return false
+	}
 	for i := range numCols {
 		name := er.ctxNameStk[nameStart+i]
 		if name == nil {
@@ -2632,8 +2634,16 @@ func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifie
 		if colName.L == "" {
 			colName = name.ColName
 		}
-		if !tableHasPublicFTSIndexOnColumn(tblInfo, colName.L) {
+		if !tableHasPublicFTSIndexOnColumnWithParser(tblInfo, colName.L, modifier.IsBooleanMode()) {
 			return false
+		}
+	}
+	if modifier.IsBooleanMode() {
+		against := er.ctxStack[stackLen-1]
+		if constant, ok := against.(*expression.Constant); ok && !constant.Value.IsNull() {
+			if _, err := expression.BuildFTSBooleanQuery(constant.Value.GetString(), model.FullTextParserTypeStandardV1); err != nil {
+				return false
+			}
 		}
 	}
 	return true
@@ -2641,12 +2651,10 @@ func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifie
 
 // ftsModifierAllowsNativePushdown reports whether an FTS modifier can be
 // safely served by the native FTSMysqlMatchAgainst builtin pushed to TiFlash.
-// Today the tipb pushdown encodes only ScalarFuncSig_FTSMatchExpression and
-// drops the modifier, so any non-default modifier would be executed by TiFlash
-// as natural-language mode, silently producing wrong results. Only the default
-// (natural-language, no query expansion) modifier is currently safe.
+// BOOLEAN MODE is carried by FTSQueryInfo.boolean_query; query expansion still
+// has no protocol representation and is therefore rejected.
 func ftsModifierAllowsNativePushdown(modifier ast.FulltextSearchModifier) bool {
-	return !modifier.IsBooleanMode() && !modifier.WithQueryExpansion()
+	return !modifier.WithQueryExpansion()
 }
 
 // tableHasPublicFTSIndexOnColumn reports whether tblInfo has a public FULLTEXT
@@ -2654,8 +2662,15 @@ func ftsModifierAllowsNativePushdown(modifier ast.FulltextSearchModifier) bool {
 // each column in MATCH(...) needs its own FTS index for the native path to be
 // viable.
 func tableHasPublicFTSIndexOnColumn(tblInfo *model.TableInfo, columnNameL string) bool {
+	return tableHasPublicFTSIndexOnColumnWithParser(tblInfo, columnNameL, false)
+}
+
+func tableHasPublicFTSIndexOnColumnWithParser(tblInfo *model.TableInfo, columnNameL string, standardParserOnly bool) bool {
 	for _, idx := range tblInfo.Indices {
 		if idx.FullTextInfo == nil || !idx.IsPublic() {
+			continue
+		}
+		if standardParserOnly && idx.FullTextInfo.ParserType != model.FullTextParserTypeStandardV1 {
 			continue
 		}
 		if idx.FindColumnByName(columnNameL) != nil {
@@ -2665,22 +2680,26 @@ func tableHasPublicFTSIndexOnColumn(tblInfo *model.TableInfo, columnNameL string
 	return false
 }
 
+func ftsNativeAnalyzerConfigSupported(sessVars *variable.SessionVars) bool {
+	config, err := fulltext.AnalyzerConfigFromSessionVars(sessVars, model.FullTextParserTypeStandardV1)
+	return err == nil &&
+		config.InnodbFtMinTokenSize == 3 &&
+		config.InnodbFtMaxTokenSize == 84 &&
+		config.InnodbFtEnableStopword
+}
+
 // matchAgainstToBuiltin converts MATCH...AGAINST to the FTSMysqlMatchAgainst
 // builtin scalar function which can be pushed down to TiFlash for execution
 // against a fulltext index.
 func (er *expressionRewriter) matchAgainstToBuiltin(v *ast.MatchAgainst, numCols, stackLen int) {
-	// Reject non-default modifiers when native is the final plan. The tipb
-	// pushdown protocol (see expression/distsql_builtin.go for the explicit
-	// note) does not serialize the FTS modifier, so TiFlash would silently
-	// execute Boolean-mode / query-expansion searches as natural-language
-	// mode. Until the modifier rides through pushdown, refuse to emit
-	// native here unless the alt-rounds driver is expected to discard this
-	// emission and rebuild via the fts-like-fallback round (which handles
-	// Boolean mode correctly via ILIKE; query expansion still errors there
-	// with a specific message).
-	if !ftsModifierAllowsNativePushdown(v.Modifier) && !er.matchHasLikeFallbackRescue() {
+	// Query expansion still has no native protocol representation. BOOLEAN
+	// MODE additionally needs an actual TiFlash FULLTEXT route; otherwise the
+	// local evaluator or the alternative fallback round must handle it.
+	if (!ftsModifierAllowsNativePushdown(v.Modifier) ||
+		(v.Modifier.IsBooleanMode() && !er.ftsNativeViable(v.Modifier, numCols, stackLen))) &&
+		!er.matchHasLikeFallbackRescue() {
 		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs(
-			"MATCH...AGAINST with this modifier on the native FTS path (modifier is not carried through pushdown to TiFlash)")
+			"MATCH...AGAINST with this modifier is not supported on the native TiFlash FTS path")
 		return
 	}
 
