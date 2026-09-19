@@ -1366,13 +1366,12 @@ func (m *memArbitrator) Stop(reason ArbitratorStopReason) bool {
 
 func (m *memArbitrator) MemUsage() (res MemUsage) {
 	if m.useBigBudget() {
-		used := max(0, m.bigBudgetUsed()-m.budget.reversal.Load())
 		return MemUsage{
-			RootPoolUsed: used,
-			HeapInuse:    used,
+			RootPoolUsed: max(0, m.bigBudgetUsed()-m.budget.reversal.Load()),
+			HeapInuse:    max(0, m.bigBudgetUsed()),
 		}
 	}
 	return MemUsage{
-		HeapInuse: max(0, max(m.smallBudgetUsed(), m.bigBudgetUsed())-m.budget.reversal.Load()),
+		HeapInuse: max(0, m.smallBudgetUsed(), m.bigBudgetUsed()),
 	}
 }
