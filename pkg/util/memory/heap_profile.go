@@ -36,6 +36,7 @@ const (
 	heapProfileCutoffMilli        int64 = 900
 	heapProfileMinInterval              = time.Minute
 	heapProfileEmergencyInterval        = 30 * time.Second
+	heapProfileCheckInterval            = time.Second
 	heapProfileMaxGroups                = 10
 	heapProfileDirName                  = "heap_profiles"
 	heapProfileTimestampLayout          = "2006-01-02T15-04-05Z0700"
@@ -65,6 +66,7 @@ type heapProfileCollector struct {
 	writeProfile func(io.Writer) error
 	dir          string
 	trigger      heapProfileTriggerState
+	lastCheckAt  time.Time
 }
 
 type heapProfileArbitratorSnapshot struct {
@@ -131,6 +133,16 @@ func (m *MemArbitrator) heapProfileSnapshot() heapProfileArbitratorSnapshot {
 
 func (p *heapProfileCollector) resetTriggerState() {
 	p.trigger = heapProfileTriggerState{}
+	p.lastCheckAt = time.Time{}
+}
+
+func (p *heapProfileCollector) shouldCheck() bool {
+	now := p.currentTime()
+	if !p.lastCheckAt.IsZero() && now.Sub(p.lastCheckAt) < heapProfileCheckInterval {
+		return false
+	}
+	p.lastCheckAt = now
+	return true
 }
 
 func (p *heapProfileCollector) tryCapture(m *MemArbitrator) {

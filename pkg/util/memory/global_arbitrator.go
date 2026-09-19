@@ -229,7 +229,7 @@ func HandleGlobalMemArbitratorRuntime() {
 		return
 	}
 	m.handleRuntimeStats(readRuntimeMemStats())
-	if profiler != nil {
+	if profiler != nil && profiler.shouldCheck() {
 		profiler.tryCapture(m)
 	}
 	reportGlobalMemArbitratorMetrics()
