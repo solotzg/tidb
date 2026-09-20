@@ -19,14 +19,14 @@ MATCH (column) AGAINST ('query' IN BOOLEAN MODE)
 - TiDB 分支：`match_against-release-8.5`，直接基于
   `pingcap/release-8.5` 的 `2787a8f1136`。
 - TiDB 当前提交：`c44ec5c6d3`。
-- TiFlash 分支：`match_against`，当前提交 `d612481ebba`。
+- TiFlash 分支：`match_against`，当前提交 `bd4f78a06c`。
 - tipb 分支：`release-8.5-match-against`，提交
   `0a9c803d4e7b`，已经推送到 `solotzg/tipb`。
 - TiDB `go.mod` 使用远程 tipb：
   `github.com/solotzg/tipb v0.0.0-20260920053028-0a9c803d4e7b`。
 
-TiDB 和 TiFlash 父仓库的最终分支推送以及 TiFlash submodule 指针更新仍是
-收尾动作，不能把当前本地工作树状态误称为已完成 E2E 交付。
+TiDB 和 TiFlash 父仓库以及 tipb 协议分支均已推送；这不等于完成真实集群
+E2E 交付，后者仍需单独验收。
 
 ## 已实现链路
 

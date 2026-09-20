@@ -2,7 +2,7 @@
 
 更新时间：2026-09-20  
 实现范围：#70484、#70485 及 TiFlash 下推  
-当前状态：TiDB 已完成 release-8.5 移植，协议依赖已发布到 tipb fork；TiDB/TiFlash 仍需最终提交和端到端验收。
+当前状态：TiDB、TiFlash 父仓库和 tipb 协议分支均已推送；端到端验收和产品化差分验证仍未完成。
 
 ## 1. 结论摘要
 
@@ -43,8 +43,8 @@ SQL MATCH ... AGAINST (... IN BOOLEAN MODE)
 | --- | --- |
 | 本地路径 | `/Users/solotzg/Work/tidb-2` |
 | 分支 | `match_against-release-8.5` |
-| upstream | 尚未设置；目标为 `origin/match_against-release-8.5` |
-| HEAD | `c44ec5c6d3f98feab8e84e693dc814ecb3234024` |
+| upstream | `origin/match_against-release-8.5` |
+| HEAD | `9e6ee16f5b` |
 | 提交说明 | `fts: push MATCH AGAINST boolean predicates to TiFlash` |
 | origin | `git@github.com:solotzg/tidb.git` |
 | 工作树 | 干净 |
@@ -61,7 +61,7 @@ master 上的无关 query-limit 提交。`pkg/sessionctx/variable` 是 release-8
 | 本地路径 | `/Users/solotzg/Work/tiflash` |
 | 分支 | `match_against` |
 | upstream | `origin/match_against` |
-| HEAD | `d612481ebba711bc4470618d386bb68391a5d665` |
+| HEAD | `bd4f78a06c` |
 | 提交说明 | `fts: support MATCH AGAINST boolean pushdown` |
 | origin | `git@github.com:solotzg/tiflash.git` |
 | 工作树 | 干净 |
@@ -80,7 +80,7 @@ TiFlash 的 `contrib/tipb` 已推送到用户 fork：
 
 该提交基于 tipb `origin/release-8.5`，保留 release-8.5 的旧协议字段，增加
 `FTSQueryInfo.boolean_query`、`FTSBooleanQuery` 和
-`used_columnar_indexes`。TiFlash 父仓库需要把 submodule 指针更新到该提交。
+`used_columnar_indexes`。TiFlash 父仓库已把 submodule 指针更新到该提交。
 
 远端地址：
 
@@ -180,7 +180,7 @@ github.com/solotzg/tipb v0.0.0-20260920053028-0a9c803d4e7b
 ```
 
 该版本保留 release-8.5 协议兼容性，同时包含对应 Boolean message 和
-`used_columnar_indexes` 字段；TiFlash submodule 也必须指向相同提交。
+`used_columnar_indexes` 字段；TiFlash submodule 已指向相同提交。
 
 ## 5. TiFlash 实现状态
 
