@@ -34,6 +34,10 @@ import (
 // for use of execution phase.
 const ExtraHandleID = -1
 
+// VirtualColFTSScoreID is the reserved column ID used by TiFlash to expose a
+// full-text relevance score produced by a native FTS scan.
+const VirtualColFTSScoreID = -2050
+
 // ExtraPhysTblID is the column ID of column that should be filled in with the physical table id.
 // Primarily used for table partition dynamic prune mode, to return which partition (physical table id) the row came from.
 // If used with a global index, the partition ID decoded from the key value will be filled in.

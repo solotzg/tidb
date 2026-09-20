@@ -19,7 +19,7 @@ import (
 
 	"github.com/pingcap/tidb/pkg/expression"
 	"github.com/pingcap/tidb/pkg/meta/model"
-	"github.com/pingcap/tidb/pkg/parser/ast"
+	pmodel "github.com/pingcap/tidb/pkg/parser/model"
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/planner/core/base"
 	"github.com/pingcap/tidb/pkg/planner/core/operator/logicalop"
@@ -164,7 +164,7 @@ func (*FullTextIndexResolverWhere) onEnterDataSource(v *FullTextIndexPlanVisitor
 	}
 	if !ftsInfo.IsMatchAgainst {
 		ds.Columns = append(ds.Columns, &model.ColumnInfo{
-			Name:      ast.NewCIStr("_FTS_SCORE"),
+			Name:      pmodel.NewCIStr("_FTS_SCORE"),
 			ID:        model.VirtualColFTSScoreID,
 			FieldType: ftsScoreType,
 		})

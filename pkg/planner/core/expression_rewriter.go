@@ -266,6 +266,7 @@ func (b *PlanBuilder) getExpressionRewriter(ctx context.Context, p base.LogicalP
 	rewriter.tryFoldCounter = 0
 	rewriter.ctxStack = rewriter.ctxStack[:0]
 	rewriter.ctxNameStk = rewriter.ctxNameStk[:0]
+	rewriter.astNodeStack = rewriter.astNodeStack[:0]
 	rewriter.ctx = ctx
 	rewriter.err = nil
 	rewriter.planCtx.plan = p
@@ -353,9 +354,12 @@ type exprRewriterPlanCtx struct {
 type expressionRewriter struct {
 	ctxStack   []expression.Expression
 	ctxNameStk []*types.FieldName
-	schema     *expression.Schema
-	names      []*types.FieldName
-	err        error
+	// astNodeStack contains the current visitor path. It is used to distinguish
+	// a MATCH predicate from a scalar MATCH score expression while rewriting.
+	astNodeStack []ast.Node
+	schema       *expression.Schema
+	names        []*types.FieldName
+	err          error
 
 	sctx expression.BuildContext
 	ctx  context.Context
@@ -531,6 +535,7 @@ func (er *expressionRewriter) requirePlanCtx(inNode ast.Node, detail string) (ct
 
 // Enter implements Visitor interface.
 func (er *expressionRewriter) Enter(inNode ast.Node) (ast.Node, bool) {
+	er.astNodeStack = append(er.astNodeStack, inNode)
 	enterWithPlanCtx := func(fn func(*exprRewriterPlanCtx) (ast.Node, bool)) (ast.Node, bool) {
 		planCtx, err := er.requirePlanCtx(inNode, "")
 		if err != nil {
@@ -1496,6 +1501,11 @@ func (er *expressionRewriter) adjustUTF8MB4Collation(tp *types.FieldType) {
 
 // Leave implements Visitor interface.
 func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok bool) {
+	defer func() {
+		if len(er.astNodeStack) > 0 {
+			er.astNodeStack = er.astNodeStack[:len(er.astNodeStack)-1]
+		}
+	}()
 	if er.err != nil {
 		return retNode, false
 	}
@@ -2430,7 +2440,7 @@ func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifie
 		}
 		dbName := name.DBName
 		if dbName.L == "" {
-			dbName = ast.NewCIStr(sessVars.CurrentDB)
+			dbName = pmodel.NewCIStr(sessVars.CurrentDB)
 		}
 		tblInfo, err := builder.is.TableInfoByName(dbName, tblName)
 		if err != nil {
@@ -2546,7 +2556,7 @@ func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, s
 	// Constant(NULL) plan and reuse it for a later non-NULL bind. Mark the
 	// plan non-cacheable here, before the NULL fast-path and before Eval, so
 	// the skip applies uniformly across all branches below.
-	if expression.MaybeOverOptimized4PlanCache(er.sctx, constExpr) {
+	if expression.MaybeOverOptimized4PlanCache(er.sctx, []expression.Expression{constExpr}) {
 		er.sctx.SetSkipPlanCache("MATCH...AGAINST LIKE fallback bakes a mutable search string into plan constants")
 	}
 
