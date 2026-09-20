@@ -102,26 +102,73 @@ type VectorIndexInfo struct {
 	DistanceMetric DistanceMetric `json:"distance_metric"`
 }
 
+// FullTextParserType is the tokenizer used by a FULLTEXT index.
+// The values are persisted in table metadata and must stay stable across
+// TiDB/TiFlash versions.
+type FullTextParserType string
+
+const (
+	FullTextParserTypeInvalid        FullTextParserType = "INVALID"
+	FullTextParserTypeStandardV1     FullTextParserType = "STANDARD_V1"
+	FullTextParserTypeMultilingualV1 FullTextParserType = "MULTILINGUAL_V1"
+	FullTextParserTypeNgramV1        FullTextParserType = "NGRAM_V1"
+)
+
+// SQLName returns the SQL-facing parser name.
+func (t FullTextParserType) SQLName() string {
+	switch t {
+	case FullTextParserTypeStandardV1:
+		return "STANDARD"
+	case FullTextParserTypeMultilingualV1:
+		return "MULTILINGUAL"
+	case FullTextParserTypeNgramV1:
+		return "NGRAM"
+	default:
+		return "INVALID"
+	}
+}
+
+// GetFullTextParserTypeBySQLName resolves a parser name from DDL syntax.
+func GetFullTextParserTypeBySQLName(name string) FullTextParserType {
+	switch strings.ToUpper(name) {
+	case "STANDARD":
+		return FullTextParserTypeStandardV1
+	case "MULTILINGUAL":
+		return FullTextParserTypeMultilingualV1
+	case "NGRAM":
+		return FullTextParserTypeNgramV1
+	default:
+		return FullTextParserTypeInvalid
+	}
+}
+
+// FullTextIndexInfo stores the metadata required by TiFlash to evaluate a
+// MATCH ... AGAINST predicate against the indexed column.
+type FullTextIndexInfo struct {
+	ParserType FullTextParserType `json:"parser_type"`
+}
+
 // IndexInfo provides meta data describing a DB index.
 // It corresponds to the statement `CREATE INDEX Name ON Table (Column);`
 // See https://dev.mysql.com/doc/refman/5.7/en/create-index.html
 type IndexInfo struct {
-	ID                  int64            `json:"id"`
-	Name                model.CIStr      `json:"idx_name"` // Index name.
-	Table               model.CIStr      `json:"tbl_name"` // Table name.
-	Columns             []*IndexColumn   `json:"idx_cols"` // Index columns.
-	State               SchemaState      `json:"state"`
-	BackfillState       BackfillState    `json:"backfill_state"`
-	Comment             string           `json:"comment"`                       // Comment
-	Tp                  model.IndexType  `json:"index_type"`                    // Index type: Btree, Hash, Rtree or HNSW
-	Unique              bool             `json:"is_unique"`                     // Whether the index is unique.
-	Primary             bool             `json:"is_primary"`                    // Whether the index is primary key.
-	Invisible           bool             `json:"is_invisible"`                  // Whether the index is invisible.
-	Global              bool             `json:"is_global"`                     // Whether the index is global.
-	MVIndex             bool             `json:"mv_index"`                      // Whether the index is multivalued index.
-	VectorInfo          *VectorIndexInfo `json:"vector_index"`                  // VectorInfo is the vector index information.
-	ConditionExprString string           `json:"partial_condition_expr_string"` // ConditionExprString is the string representation of the partial index condition.
-	AffectColumn        []*IndexColumn   `json:"affect_column,omitempty"`       // AffectColumn is the columns related to the index.
+	ID                  int64              `json:"id"`
+	Name                model.CIStr        `json:"idx_name"` // Index name.
+	Table               model.CIStr        `json:"tbl_name"` // Table name.
+	Columns             []*IndexColumn     `json:"idx_cols"` // Index columns.
+	State               SchemaState        `json:"state"`
+	BackfillState       BackfillState      `json:"backfill_state"`
+	Comment             string             `json:"comment"`                       // Comment
+	Tp                  model.IndexType    `json:"index_type"`                    // Index type: Btree, Hash, Rtree or HNSW
+	Unique              bool               `json:"is_unique"`                     // Whether the index is unique.
+	Primary             bool               `json:"is_primary"`                    // Whether the index is primary key.
+	Invisible           bool               `json:"is_invisible"`                  // Whether the index is invisible.
+	Global              bool               `json:"is_global"`                     // Whether the index is global.
+	MVIndex             bool               `json:"mv_index"`                      // Whether the index is multivalued index.
+	VectorInfo          *VectorIndexInfo   `json:"vector_index"`                  // VectorInfo is the vector index information.
+	FullTextInfo        *FullTextIndexInfo `json:"full_text_index"`               // FullTextInfo is the FULLTEXT index information.
+	ConditionExprString string             `json:"partial_condition_expr_string"` // ConditionExprString is the string representation of the partial index condition.
+	AffectColumn        []*IndexColumn     `json:"affect_column,omitempty"`       // AffectColumn is the columns related to the index.
 	// Version of global index key format for non-clustered tables.
 	// Set to V1 when the handle can appear in the index key (non-unique indexes,
 	// or unique indexes with any nullable column) to prevent collisions after EXCHANGE PARTITION.
@@ -210,7 +257,7 @@ func (index *IndexInfo) IsPublic() bool {
 // IsTiFlashLocalIndex checks whether the index is a TiFlash local index.
 // For a TiFlash local index, no actual index data need to be written to KV layer.
 func (index *IndexInfo) IsTiFlashLocalIndex() bool {
-	return index.VectorInfo != nil
+	return index.VectorInfo != nil || index.FullTextInfo != nil
 }
 
 // HasCondition checks whether the index has a partial index condition.

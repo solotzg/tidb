@@ -25,7 +25,6 @@ import (
 
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tidb/pkg/sessionctx"
-	"github.com/pingcap/tidb/pkg/sessionctx/vardef"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 )
 
@@ -103,19 +102,19 @@ func AnalyzerConfigFromSessionVars(sessVars *variable.SessionVars, parserType mo
 	if sessVars == nil {
 		return AnalyzerConfig{}, fmt.Errorf("missing session vars for fulltext analyzer")
 	}
-	enableStopword, err := getFulltextSysVar(sessVars, vardef.InnodbFtEnableStopword)
+	enableStopword, err := getFulltextSysVar(sessVars, variable.InnodbFtEnableStopword)
 	if err != nil {
 		return AnalyzerConfig{}, err
 	}
-	minTokenSize, err := getFulltextIntSysVar(sessVars, vardef.InnodbFtMinTokenSize)
+	minTokenSize, err := getFulltextIntSysVar(sessVars, variable.InnodbFtMinTokenSize)
 	if err != nil {
 		return AnalyzerConfig{}, err
 	}
-	maxTokenSize, err := getFulltextIntSysVar(sessVars, vardef.InnodbFtMaxTokenSize)
+	maxTokenSize, err := getFulltextIntSysVar(sessVars, variable.InnodbFtMaxTokenSize)
 	if err != nil {
 		return AnalyzerConfig{}, err
 	}
-	ngramTokenSize, err := getFulltextIntSysVar(sessVars, vardef.NgramTokenSize)
+	ngramTokenSize, err := getFulltextIntSysVar(sessVars, variable.NgramTokenSize)
 	if err != nil {
 		return AnalyzerConfig{}, err
 	}

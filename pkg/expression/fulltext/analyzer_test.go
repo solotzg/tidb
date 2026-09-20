@@ -18,7 +18,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pingcap/tidb/pkg/sessionctx/vardef"
 	"github.com/pingcap/tidb/pkg/sessionctx/variable"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
@@ -49,7 +48,7 @@ func TestAnalyzeStandardV1(t *testing.T) {
 
 	// Turning stopwords off keeps the same word, so the two settings produce
 	// different token streams for identical input.
-	require.NoError(t, sctx.GetSessionVars().SetSystemVar(vardef.InnodbFtEnableStopword, vardef.Off))
+	require.NoError(t, sctx.GetSessionVars().SetSystemVar(variable.InnodbFtEnableStopword, variable.Off))
 	tokens, err = AnalyzeStandardV1(sctx, "The foo_bar, a 好")
 	require.NoError(t, err)
 	require.Equal(t, []Token{
@@ -58,7 +57,7 @@ func TestAnalyzeStandardV1(t *testing.T) {
 	}, tokens)
 
 	// "cat" is not a stop word, so it survives either way.
-	require.NoError(t, sctx.GetSessionVars().SetSystemVar(vardef.InnodbFtEnableStopword, vardef.On))
+	require.NoError(t, sctx.GetSessionVars().SetSystemVar(variable.InnodbFtEnableStopword, variable.On))
 	tokens, err = AnalyzeStandardV1(sctx, "The cat")
 	require.NoError(t, err)
 	require.Equal(t, []Token{
@@ -94,8 +93,8 @@ func TestDefaultInnodbStopwordList(t *testing.T) {
 
 func TestAnalyzeStandardV1ReadsTokenSizesFromSessionContext(t *testing.T) {
 	sctx := newFulltextTestContext(t)
-	setGlobalSysVar(t, sctx, vardef.InnodbFtMinTokenSize, "1")
-	require.NoError(t, sctx.GetSessionVars().SetSystemVar(vardef.InnodbFtEnableStopword, vardef.Off))
+	setGlobalSysVar(t, sctx, variable.InnodbFtMinTokenSize, "1")
+	require.NoError(t, sctx.GetSessionVars().SetSystemVar(variable.InnodbFtEnableStopword, variable.Off))
 
 	tokens, err := AnalyzeStandardV1(sctx, "A 好 xy")
 	require.NoError(t, err)
@@ -147,7 +146,7 @@ func TestUTF8CharSpansInvalidUTF8(t *testing.T) {
 
 func TestAnalyzeNgramV1ReadsTokenSizeFromSessionContext(t *testing.T) {
 	sctx := newFulltextTestContext(t)
-	setGlobalSysVar(t, sctx, vardef.NgramTokenSize, "3")
+	setGlobalSysVar(t, sctx, variable.NgramTokenSize, "3")
 
 	tokens, err := AnalyzeNgramV1(sctx, "abcd")
 	require.NoError(t, err)
