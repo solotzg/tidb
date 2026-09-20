@@ -47,7 +47,7 @@ SQL MATCH ... AGAINST (... IN BOOLEAN MODE)
 | HEAD | `9e6ee16f5b` |
 | 提交说明 | `fts: push MATCH AGAINST boolean predicates to TiFlash` |
 | origin | `git@github.com:solotzg/tidb.git` |
-| 工作树 | 干净 |
+| 工作树 | FTS tracked changes clean；原有 `.codex/`、`bazel-tidb-2` 未跟踪项保留 |
 
 TiDB 分支直接基于 `pingcap/release-8.5` 提交 `2787a8f1136`，未包含
 master 上的无关 query-limit 提交。`pkg/sessionctx/variable` 是 release-8.5
