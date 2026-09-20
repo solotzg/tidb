@@ -22,6 +22,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/ast"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tipb/go-tipb"
 )
 
 var _ functionClass = &ftsMysqlMatchAgainstFunctionClass{}
@@ -67,6 +68,10 @@ type ftsLocalEvalPlan struct {
 	analyzer fulltext.Analyzer
 }
 
+func (b *builtinFtsMysqlMatchAgainstSig) hasLocalEvalInfo() bool {
+	return b.localEvalInfo != nil
+}
+
 func (b *builtinFtsMysqlMatchAgainstSig) Clone() builtinFunc {
 	newSig := &builtinFtsMysqlMatchAgainstSig{}
 	newSig.cloneFrom(&b.baseBuiltinFunc)
@@ -86,7 +91,20 @@ func SetFTSMysqlMatchAgainstModifier(sf *ScalarFunction, modifier ast.FulltextSe
 	return nil
 }
 
-// SetFTSMysqlMatchAgainstLocalEvalInfo authorises local no-score evaluation.
+// GetFTSMysqlMatchAgainstModifier returns the modifier attached to the
+// internal `MATCH ... AGAINST` builtin signature.
+func GetFTSMysqlMatchAgainstModifier(sf *ScalarFunction) (ast.FulltextSearchModifier, bool) {
+	sig, ok := sf.Function.(*builtinFtsMysqlMatchAgainstSig)
+	if !ok {
+		return ast.FulltextSearchModifierNaturalLanguageMode, false
+	}
+	return sig.modifier, true
+}
+
+// SetFTSMysqlMatchAgainstLocalEvalInfo attaches planner-validated local
+// no-score evaluation metadata to a `MATCH ... AGAINST` builtin, authorising it
+// to evaluate in TiDB. It is expected to be called by the planner right after
+// building the scalar function.
 func SetFTSMysqlMatchAgainstLocalEvalInfo(sf *ScalarFunction, info *FTSLocalEvalInfo) error {
 	sig, ok := sf.Function.(*builtinFtsMysqlMatchAgainstSig)
 	if !ok {
@@ -149,7 +167,7 @@ func (c *ftsMysqlMatchAgainstFunctionClass) getFunction(ctx BuildContext, args [
 			return nil, ErrNotSupportedYet.GenWithStackByArgs("not matching a column")
 		}
 		if arg.GetType(ctx.GetEvalCtx()).EvalType() != types.ETString {
-			return nil, ErrNotSupportedYet.GenWithStackByArgs("Doesn't support match search on a non-string column without fulltext index")
+			return nil, ErrNotSupportedYet.GenWithStackByArgs("MATCH ... AGAINST requires string columns")
 		}
 		argTps = append(argTps, types.ETString)
 	}
@@ -158,7 +176,9 @@ func (c *ftsMysqlMatchAgainstFunctionClass) getFunction(ctx BuildContext, args [
 	if err != nil {
 		return nil, err
 	}
-	return &builtinFtsMysqlMatchAgainstSig{baseBuiltinFunc: bf}, nil
+	sig := &builtinFtsMysqlMatchAgainstSig{baseBuiltinFunc: bf}
+	sig.setPbCode(tipb.ScalarFuncSig_FTSMatchExpression)
+	return sig, nil
 }
 
 func (b *builtinFtsMysqlMatchAgainstSig) evalReal(ctx EvalContext, row chunk.Row) (float64, bool, error) {

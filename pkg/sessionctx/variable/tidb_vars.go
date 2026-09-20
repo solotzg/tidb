@@ -341,7 +341,8 @@ const (
 	// produce an equivalent same-order index join candidate.
 	TiDBOptEnableAlternativeLogicalPlans = "tidb_opt_enable_alternative_logical_plans"
 
-	// TiDBEnableLocalMatchAgainst enables local no-score MATCH ... AGAINST evaluation.
+	// TiDBEnableLocalMatchAgainst is retained for compatibility. Local no-score
+	// MATCH ... AGAINST evaluation is automatic when TiFlash pushdown is unavailable.
 	TiDBEnableLocalMatchAgainst = "tidb_enable_local_match_against"
 
 	// TiDBOptLimitPushDownThreshold determines if push Limit or TopN down to TiKV forcibly.
@@ -1356,7 +1357,7 @@ const (
 	DefOptEnableCorrelationAdjustment       = true
 	DefOptEnableNoDecorrelateInSelect       = false
 	DefOptEnableAlternativeLogicalPlans     = false
-	DefTiDBEnableLocalMatchAgainst          = false
+	DefTiDBEnableLocalMatchAgainst          = true
 	DefOptEnableSemiJoinRewrite             = false
 	DefOptLimitPushDownThreshold            = 100
 	DefOptCorrelationThreshold              = 0.9

@@ -2273,27 +2273,27 @@ func (er *expressionRewriter) matchAgainstToExpression(v *ast.MatchAgainst) {
 		return
 	}
 
-	sessVars := er.planCtx.builder.ctx.GetSessionVars()
-	if !sessVars.EnableLocalMatchAgainst {
-		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH ... AGAINST without tidb_enable_local_match_against")
+	if er.ftsNativeViable(v.Modifier, numCols, stackLen) {
+		er.matchAgainstToBuiltin(v, numCols, stackLen)
 		return
 	}
-	indexInfo, err := er.resolveLocalFullTextIndex(numCols, stackLen)
+	parserType, err := er.resolveLocalFullTextParser(numCols, stackLen)
 	if err != nil {
 		er.err = err
 		return
 	}
-	er.matchAgainstToLocalBuiltin(v, numCols, stackLen, indexInfo)
+	er.matchAgainstToLocalBuiltin(v, numCols, stackLen, parserType)
 }
 
-func (er *expressionRewriter) resolveLocalFullTextIndex(numCols, stackLen int) (*model.IndexInfo, error) {
+func (er *expressionRewriter) resolveLocalFullTextParser(numCols, stackLen int) (model.FullTextParserType, error) {
+	parserType := model.FullTextParserTypeStandardV1
 	nameStart := stackLen - numCols - 1
 	if nameStart < 0 || er.planCtx == nil || er.planCtx.builder == nil {
-		return nil, plannererrors.ErrFtMatchingKeyNotFound
+		return parserType, plannererrors.ErrFtMatchingKeyNotFound
 	}
 	first := er.ctxNameStk[nameStart]
 	if first == nil {
-		return nil, plannererrors.ErrFtMatchingKeyNotFound
+		return parserType, plannererrors.ErrFtMatchingKeyNotFound
 	}
 	dbName, tblName := first.DBName, first.OrigTblName
 	if tblName.L == "" {
@@ -2304,26 +2304,30 @@ func (er *expressionRewriter) resolveLocalFullTextIndex(numCols, stackLen int) (
 	}
 	tblInfo, err := er.planCtx.builder.is.TableInfoByName(dbName, tblName)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return parserType, errors.Trace(err)
 	}
 	columnNames := make([]string, numCols)
 	for i := range numCols {
 		name := er.ctxNameStk[nameStart+i]
 		if name == nil {
-			return nil, plannererrors.ErrFtMatchingKeyNotFound
+			return parserType, plannererrors.ErrFtMatchingKeyNotFound
 		}
 		nameTable := name.OrigTblName
 		if nameTable.L == "" {
 			nameTable = name.TblName
 		}
 		if nameTable.L != tblName.L || name.DBName.L != "" && name.DBName.L != dbName.L {
-			return nil, plannererrors.ErrFtMatchingKeyNotFound
+			return parserType, plannererrors.ErrFtMatchingKeyNotFound
 		}
 		colName := name.OrigColName
 		if colName.L == "" {
 			colName = name.ColName
 		}
 		columnNames[i] = colName.L
+		columnInfo := tblInfo.FindPublicColumnByName(colName.L)
+		if columnInfo == nil || !types.IsString(columnInfo.FieldType.GetType()) {
+			return parserType, plannererrors.ErrFtMatchingKeyNotFound
+		}
 	}
 	for _, idx := range tblInfo.Indices {
 		if idx.State != model.StatePublic || idx.FullTextInfo == nil || len(idx.Columns) != len(columnNames) {
@@ -2337,13 +2341,15 @@ func (er *expressionRewriter) resolveLocalFullTextIndex(numCols, stackLen int) (
 			}
 		}
 		if matched {
-			return idx, nil
+			return idx.FullTextInfo.ParserType, nil
 		}
 	}
-	return nil, plannererrors.ErrFtMatchingKeyNotFound
+	// A FULLTEXT index is optional for the release-8.5 local matcher. The
+	// metadata, when present, can select a parser; otherwise use STANDARD.
+	return parserType, nil
 }
 
-func (er *expressionRewriter) matchAgainstToLocalBuiltin(v *ast.MatchAgainst, numCols, stackLen int, indexInfo *model.IndexInfo) {
+func (er *expressionRewriter) matchAgainstToLocalBuiltin(v *ast.MatchAgainst, numCols, stackLen int, parserType model.FullTextParserType) {
 	against := er.ctxStack[stackLen-1]
 	cols := er.ctxStack[stackLen-numCols-1 : stackLen-1]
 	args := make([]expression.Expression, 0, numCols+1)
@@ -2366,7 +2372,7 @@ func (er *expressionRewriter) matchAgainstToLocalBuiltin(v *ast.MatchAgainst, nu
 		return
 	}
 
-	config, err := fulltext.AnalyzerConfigFromSessionVars(er.planCtx.builder.ctx.GetSessionVars(), indexInfo.FullTextInfo.ParserType)
+	config, err := fulltext.AnalyzerConfigFromSessionVars(er.planCtx.builder.ctx.GetSessionVars(), parserType)
 	if err != nil {
 		er.err = err
 		return
@@ -2389,6 +2395,198 @@ func (er *expressionRewriter) matchAgainstToLocalBuiltin(v *ast.MatchAgainst, nu
 		return
 	}
 	er.ctxStackAppend(fn, types.EmptyName)
+}
+
+// ftsNativeViable reports whether the MATCH(...) currently being rewritten
+// can be served on TiFlash by the native FTSMysqlMatchAgainst builtin. It
+// walks the resolved column FieldNames sitting on ctxNameStk (stack layout is
+// [..., col1, ..., colN, against]) and requires for each column:
+//   - the originating table has an available TiFlash replica;
+//   - the column is a public string column.
+//
+// In addition, BOOLEAN MODE requires the STANDARD parser and TiDB's default
+// analyzer settings because those are the only settings represented by the
+// current TiFlash protocol. Natural-language mode retains its existing native
+// viability rules; query expansion is not part of this feature.
+func (er *expressionRewriter) ftsNativeViable(modifier ast.FulltextSearchModifier, numCols, stackLen int) bool {
+	if numCols <= 0 {
+		return false
+	}
+	if modifier.IsBooleanMode() && numCols != 1 {
+		return false
+	}
+	if !ftsModifierAllowsNativePushdown(modifier) {
+		return false
+	}
+	builder := er.planCtx.builder
+	sessVars := builder.ctx.GetSessionVars()
+	if modifier.IsBooleanMode() && !ftsNativeAnalyzerConfigSupported(sessVars) {
+		return false
+	}
+	nameStart := stackLen - numCols - 1
+	if nameStart < 0 || stackLen > len(er.ctxNameStk) || stackLen > len(er.ctxStack) {
+		return false
+	}
+	for i := range numCols {
+		name := er.ctxNameStk[nameStart+i]
+		if name == nil {
+			return false
+		}
+		tblName := name.OrigTblName
+		if tblName.L == "" {
+			tblName = name.TblName
+		}
+		if tblName.L == "" {
+			return false
+		}
+		dbName := name.DBName
+		if dbName.L == "" {
+			dbName = pmodel.NewCIStr(sessVars.CurrentDB)
+		}
+		tblInfo, err := builder.is.TableInfoByName(dbName, tblName)
+		if err != nil {
+			return false
+		}
+		if tblInfo.TiFlashReplica == nil || !tblInfo.TiFlashReplica.Available || tblInfo.TiFlashReplica.Count == 0 {
+			return false
+		}
+		colName := name.OrigColName
+		if colName.L == "" {
+			colName = name.ColName
+		}
+		columnInfo := tblInfo.FindPublicColumnByName(colName.L)
+		if columnInfo == nil || !types.IsString(columnInfo.FieldType.GetType()) {
+			return false
+		}
+	}
+	if modifier.IsBooleanMode() {
+		against := er.ctxStack[stackLen-1]
+		if constant, ok := against.(*expression.Constant); ok && !constant.Value.IsNull() {
+			if _, err := expression.BuildFTSBooleanQuery(constant.Value.GetString(), model.FullTextParserTypeStandardV1); err != nil {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ftsModifierAllowsNativePushdown reports whether an FTS modifier can be
+// safely served by the native FTSMysqlMatchAgainst builtin pushed to TiFlash.
+// BOOLEAN MODE is carried by FTSQueryInfo.boolean_query; query expansion still
+// has no protocol representation and is therefore rejected.
+func ftsModifierAllowsNativePushdown(modifier ast.FulltextSearchModifier) bool {
+	return !modifier.WithQueryExpansion()
+}
+
+func ftsNativeAnalyzerConfigSupported(sessVars *variable.SessionVars) bool {
+	config, err := fulltext.AnalyzerConfigFromSessionVars(sessVars, model.FullTextParserTypeStandardV1)
+	return err == nil &&
+		config.InnodbFtMinTokenSize == 3 &&
+		config.InnodbFtMaxTokenSize == 84 &&
+		config.InnodbFtEnableStopword
+}
+
+// matchAgainstToBuiltin converts MATCH...AGAINST to the FTSMysqlMatchAgainst
+// builtin scalar function which can be pushed down to TiFlash for execution
+// against a fulltext index.
+func (er *expressionRewriter) matchAgainstToBuiltin(v *ast.MatchAgainst, numCols, stackLen int) {
+	against := er.ctxStack[stackLen-1]
+	cols := er.ctxStack[stackLen-numCols-1 : stackLen-1]
+
+	args := make([]expression.Expression, 0, 1+numCols)
+	args = append(args, against)
+	args = append(args, cols...)
+
+	er.ctxStackPop(numCols + 1)
+	fn, err := er.newFunction(ast.FTSMysqlMatchAgainst, &v.Type, args...)
+	if err != nil {
+		er.err = err
+		return
+	}
+	sf, ok := fn.(*expression.ScalarFunction)
+	if !ok {
+		er.err = errors.Errorf("unexpected expression type for %s: %T", ast.FTSMysqlMatchAgainst, fn)
+		return
+	}
+	if err := expression.SetFTSMysqlMatchAgainstModifier(sf, v.Modifier); err != nil {
+		er.err = err
+		return
+	}
+	er.ctxStackAppend(fn, types.EmptyName)
+}
+
+// matchAgainstToLike converts MATCH...AGAINST to LIKE predicates as a
+// fallback when the native FTS pushdown path is not viable.
+func (er *expressionRewriter) matchAgainstToLike(v *ast.MatchAgainst, numCols, stackLen int) {
+	againstExpr := er.ctxStack[stackLen-1]
+
+	constExpr, ok := againstExpr.(*expression.Constant)
+	if !ok {
+		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with non-constant search string")
+		return
+	}
+
+	// The LIKE fallback bakes the search value into the produced plan — either
+	// as ILIKE pattern constants (non-NULL case) or as a Constant(NULL)
+	// short-circuit. A cached plan would reuse the first execution's baked
+	// value for later executions, producing wrong results whenever the AGAINST
+	// argument is mutable: a `?` parameter marker, a user variable, or another
+	// deferred expression. In particular, a NULL first bind would bake a
+	// Constant(NULL) plan and reuse it for a later non-NULL bind. Mark the
+	// plan non-cacheable here, before the NULL fast-path and before Eval, so
+	// the skip applies uniformly across all branches below.
+	if expression.MaybeOverOptimized4PlanCache(er.sctx, []expression.Expression{constExpr}) {
+		er.sctx.SetSkipPlanCache("MATCH...AGAINST LIKE fallback bakes a mutable search string into plan constants")
+	}
+
+	// Reject non-string matched columns before any value-based branch so the
+	// column-type error always wins. In current architecture round 1's
+	// matchAgainstToBuiltin → getFunction (builtin_fts.go) already rejects
+	// non-string columns before round 2 (this function) can run, but keep
+	// the check here too as defense in depth: the LIKE fallback's own NULL
+	// fast-path and strict-subset validator below should never accept a
+	// non-string column, regardless of any future code path that might
+	// reach this function around round 1.
+	columns := make([]expression.Expression, numCols)
+	for i := range numCols {
+		col := er.ctxStack[stackLen-numCols-1+i]
+		if col.GetType(er.sctx.GetEvalCtx()).EvalType() != types.ETString {
+			er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("Doesn't support match search on a non-string column without fulltext index")
+			return
+		}
+		columns[i] = col
+	}
+
+	searchText, err := constExpr.Eval(er.sctx.GetEvalCtx(), chunk.Row{})
+	if err != nil {
+		er.err = err
+		return
+	}
+
+	if searchText.IsNull() {
+		// NULL search yields NULL in MySQL FTS semantics
+		// (builtin_fts.go evalReal returns isNull=true for NULL args), so we
+		// emit Constant(NULL) rather than Constant(0). This preserves
+		// three-valued logic under NOT — NOT NULL = NULL filters the row —
+		// and under IS NULL / IS NOT NULL. A literal Constant(0) would make
+		// NOT(MATCH...) admit every row when the search is NULL, diverging
+		// from native semantics.
+		er.ctxStackPop(numCols + 1)
+		er.ctxStackAppend(&expression.Constant{
+			Value:   types.Datum{},
+			RetType: types.NewFieldType(mysql.TypeTiny),
+		}, types.EmptyName)
+		return
+	}
+
+	if searchText.Kind() != types.KindString {
+		er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST with non-string search expression")
+		return
+	}
+
+	_ = searchText
+	_ = columns
+	er.err = expression.ErrNotSupportedYet.GenWithStackByArgs("MATCH...AGAINST LIKE fallback is not supported")
 }
 
 func (er *expressionRewriter) regexpToScalarFunc(v *ast.PatternRegexpExpr) {
