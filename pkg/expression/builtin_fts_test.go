@@ -275,6 +275,23 @@ func localEvalInfoForTest() *FTSLocalEvalInfo {
 	}
 }
 
+func newFTSMatchAgainstForTest(t *testing.T, ctx BuildContext, search string, numCols int, modifier ast.FulltextSearchModifier) *ScalarFunction {
+	t.Helper()
+	stringTp := types.NewFieldType(mysql.TypeVarchar)
+	stringTp.SetCollate(mysql.DefaultCollationName)
+	args := make([]Expression, 0, 1+numCols)
+	args = append(args, &Constant{Value: types.NewStringDatum(search), RetType: stringTp})
+	for i := range numCols {
+		args = append(args, &Column{Index: i, RetType: stringTp})
+	}
+	fn, err := NewFunction(ctx, ast.FTSMysqlMatchAgainst, types.NewFieldType(mysql.TypeDouble), args...)
+	require.NoError(t, err)
+	sf, ok := fn.(*ScalarFunction)
+	require.True(t, ok)
+	require.NoError(t, SetFTSMysqlMatchAgainstModifier(sf, modifier))
+	return sf
+}
+
 func stringRow(s string) chunk.Row {
 	return chunk.MutRowFromDatums([]types.Datum{types.NewStringDatum(s)}).ToRow()
 }

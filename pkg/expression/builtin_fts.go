@@ -18,7 +18,6 @@ import (
 	"sync"
 
 	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/config/deploymode"
 	"github.com/pingcap/tidb/pkg/expression/expropt"
 	"github.com/pingcap/tidb/pkg/expression/fulltext"
 	"github.com/pingcap/tidb/pkg/parser/ast"
@@ -190,10 +189,6 @@ func (c *ftsMatchWordFunctionClass) getFunction(ctx BuildContext, args []Express
 	if err := c.verifyArgs(args); err != nil {
 		return nil, err
 	}
-	if !deploymode.IsStarter() {
-		return nil, ErrNotSupportedYet.GenWithStackByArgs("FTS_MATCH_WORD() is only supported in starter deployment mode")
-	}
-
 	argAgainst := args[0]
 	argAgainstConstant, ok := argAgainst.(*Constant)
 	if !ok {

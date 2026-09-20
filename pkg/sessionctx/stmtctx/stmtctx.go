@@ -482,6 +482,10 @@ type StatementContext struct {
 	// build round encountered a non-correlated IN subquery eligible for the
 	// correlate-to-Apply alternative.
 	AlternativeLogicalPlanPreferCorrelate bool
+	// FTSFunctionIsUsed indicates that FTS_MATCH_WORD() appears in the current
+	// statement, allowing the optimizer to run FTS-specific validation and
+	// rewrite rules only when needed.
+	FTSFunctionIsUsed bool
 
 	// IsExplainAnalyzeDML is true if the statement is "explain analyze DML executors", before responding the explain
 	// results to the client, the transaction should be committed first. See issue #37373 for more details.
@@ -652,6 +656,7 @@ func (sc *StatementContext) ResetAlternativeLogicalPlanSignals() {
 	sc.AlternativeLogicalPlanDecorrelatedApply = false
 	sc.AlternativeLogicalPlanSameOrderIndexJoin = false
 	sc.AlternativeLogicalPlanPreferCorrelate = false
+	sc.FTSFunctionIsUsed = false
 }
 
 // MarkAlternativeLogicalPlanDecorrelatedApply records that at least one Apply has
