@@ -1576,6 +1576,10 @@ func (er *expressionRewriter) Leave(originInNode ast.Node) (retNode ast.Node, ok
 		er.toTable(v)
 	case *ast.ColumnName:
 		er.toColumn(v)
+	case *ast.MatchAgainst:
+		withPlanCtx(func(_ *exprRewriterPlanCtx) {
+			er.matchAgainstToExpression(v)
+		}, "MATCH ... AGAINST requires plan context")
 	case *ast.UnaryOperationExpr:
 		er.unaryOpToExpression(v)
 	case *ast.BinaryOperationExpr:

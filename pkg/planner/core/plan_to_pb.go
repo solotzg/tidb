@@ -267,7 +267,27 @@ func (p *PhysicalTableScan) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 	if storeType == kv.TiFlash && p.Table.GetPartitionInfo() != nil && p.IsMPPOrBatchCop && p.SCtx().GetSessionVars().StmtCtx.UseDynamicPartitionPrune() {
 		return p.partitionTableScanToPBForFlash(ctx)
 	}
-	tsExec := tables.BuildTableScanFromInfos(p.Table, p.Columns, p.StoreType == kv.TiFlash)
+	scanColumns := p.Columns
+	if storeType == kv.TiFlash && p.FtsQueryInfo != nil {
+		// FTS document columns are consumed inside TiFlash's table scan. Keep
+		// them in the protocol column list even if an upper operator such as
+		// COUNT(*) has pruned them from the physical output schema.
+		for _, queryColumn := range p.FtsQueryInfo.Columns {
+			found := false
+			for _, column := range scanColumns {
+				if column.ID == queryColumn.ColumnId {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if column := model.FindColumnInfoByID(p.Table.Columns, queryColumn.ColumnId); column != nil {
+					scanColumns = append(scanColumns, column)
+				}
+			}
+		}
+	}
+	tsExec := tables.BuildTableScanFromInfos(p.Table, scanColumns, p.StoreType == kv.TiFlash)
 	tsExec.Desc = p.Desc
 	keepOrder := p.KeepOrder
 	tsExec.KeepOrder = &keepOrder
@@ -315,12 +335,29 @@ func (p *PhysicalTableScan) ToPB(ctx *base.BuildPBContext, storeType kv.StoreTyp
 			telemetry.CurrentTiflashTableScanWithFastScanCount.Inc()
 		}
 	}
-	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), tsExec.Columns, p.Columns)
+	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), tsExec.Columns, scanColumns)
 	return &tipb.Executor{Tp: tipb.ExecType_TypeTableScan, TblScan: tsExec, ExecutorId: &executorID}, err
 }
 
 func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx *base.BuildPBContext) (*tipb.Executor, error) {
-	ptsExec := tables.BuildPartitionTableScanFromInfos(p.Table, p.Columns, ctx.TiFlashFastScan)
+	scanColumns := p.Columns
+	if p.FtsQueryInfo != nil {
+		for _, queryColumn := range p.FtsQueryInfo.Columns {
+			found := false
+			for _, column := range scanColumns {
+				if column.ID == queryColumn.ColumnId {
+					found = true
+					break
+				}
+			}
+			if !found {
+				if column := model.FindColumnInfoByID(p.Table.Columns, queryColumn.ColumnId); column != nil {
+					scanColumns = append(scanColumns, column)
+				}
+			}
+		}
+	}
+	ptsExec := tables.BuildPartitionTableScanFromInfos(p.Table, scanColumns, ctx.TiFlashFastScan)
 	telemetry.CurrentTiflashTableScanCount.Inc()
 	if *(ptsExec.IsFastScan) {
 		telemetry.CurrentTiflashTableScanWithFastScanCount.Inc()
@@ -360,7 +397,7 @@ func (p *PhysicalTableScan) partitionTableScanToPBForFlash(ctx *base.BuildPBCont
 	}
 
 	executorID := p.ExplainID().String()
-	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), ptsExec.Columns, p.Columns)
+	err = tables.SetPBColumnsDefaultValue(ctx.GetExprCtx(), ptsExec.Columns, scanColumns)
 	return &tipb.Executor{Tp: tipb.ExecType_TypePartitionTableScan, PartitionTableScan: ptsExec, ExecutorId: &executorID}, err
 }
 

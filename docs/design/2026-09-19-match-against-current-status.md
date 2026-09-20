@@ -1,5 +1,9 @@
 # MATCH AGAINST BOOLEAN MODE 下推当前状态报告
 
+> 历史状态文档。本文中的构建、E2E 和工作树状态已经过期；当前状态和 ETA
+> 以[最新交付状态文档](./2026-09-20-match-against-release-8.5-delivery-status.md)
+> 为准。
+
 更新时间：2026-09-20
 实现范围：#70484、#70485 及 TiFlash 下推
 当前状态：TiDB、TiFlash 父仓库和 tipb 协议分支均已推送；端到端验收和产品化差分验证仍未完成。

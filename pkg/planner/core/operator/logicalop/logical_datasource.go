@@ -259,6 +259,20 @@ func (ds *DataSource) PruneColumns(parentUsedCols []*expression.Column, opt *opt
 
 	exprCols := expression.ExtractColumnsFromExpressions(nil, ds.AllConds, nil)
 	exprUsed := expression.GetUsedList(ds.SCtx().GetExprCtx().GetEvalCtx(), exprCols, ds.Schema())
+	// A native full-text predicate is removed from the logical Selection after
+	// its query metadata is recorded in FtsPushDown. Keep the MATCH columns in
+	// the physical table scan even when they are not part of the parent
+	// projection; TiFlash needs the document columns to evaluate the FTS query.
+	if ds.FtsPushDown != nil && ds.FtsPushDown.QueryInfo != nil {
+		for _, queryColumn := range ds.FtsPushDown.QueryInfo.Columns {
+			for i, schemaColumn := range ds.Schema().Columns {
+				if schemaColumn.ID == queryColumn.ColumnId {
+					used[i] = true
+					break
+				}
+			}
+		}
+	}
 	prunedColumns := make([]*expression.Column, 0)
 
 	originSchemaColumns := ds.Schema().Columns

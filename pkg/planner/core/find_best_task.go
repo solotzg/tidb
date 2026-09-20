@@ -2309,6 +2309,35 @@ func overwritePartialTableScanSchema(ds *logicalop.DataSource, ts *PhysicalTable
 			infoCols = append(infoCols, col.ToInfo())
 		}
 	}
+	// A partial table scan normally keeps only handle columns. Native FTS is
+	// evaluated by TiFlash's table scan, however, so retain the document
+	// columns even when the parent operator is COUNT(*) or otherwise does not
+	// reference them.
+	if ds.FtsPushDown != nil && ds.FtsPushDown.QueryInfo != nil {
+		for _, queryColumn := range ds.FtsPushDown.QueryInfo.Columns {
+			columnID := queryColumn.ColumnId
+			alreadyPresent := false
+			for _, col := range exprCols {
+				if col.ID == columnID {
+					alreadyPresent = true
+					break
+				}
+			}
+			if alreadyPresent {
+				continue
+			}
+			col, ok := ds.TblColsByID[columnID]
+			if !ok {
+				continue
+			}
+			exprCols = append(exprCols, col)
+			if info := model.FindColumnInfoByID(ds.TableInfo.Columns, columnID); info != nil {
+				infoCols = append(infoCols, info)
+			} else {
+				infoCols = append(infoCols, col.ToInfo())
+			}
+		}
+	}
 	ts.schema = expression.NewSchema(exprCols...)
 	ts.Columns = infoCols
 }
@@ -2945,12 +2974,61 @@ func splitIndexFilterConditions(ds *logicalop.DataSource, conditions []expressio
 	return indexConditions, tableConditions
 }
 
+func ensureFTSColumnsForPhysicalScan(
+	ds *logicalop.DataSource,
+	columns []*model.ColumnInfo,
+	schema *expression.Schema,
+) ([]*model.ColumnInfo, *expression.Schema) {
+	physicalColumns := slices.Clone(columns)
+	physicalSchema := schema.Clone()
+	if ds.FtsPushDown == nil || ds.FtsPushDown.QueryInfo == nil {
+		return physicalColumns, physicalSchema
+	}
+
+	// MATCH columns are consumed by TiFlash's FTS table-scan operator. They
+	// may not be required by the parent operator (for example COUNT(*)), so
+	// make them explicit physical-scan inputs after logical column pruning.
+	for _, queryColumn := range ds.FtsPushDown.QueryInfo.Columns {
+		columnID := queryColumn.ColumnId
+		hasScanColumn := false
+		for _, column := range physicalColumns {
+			if column.ID == columnID {
+				hasScanColumn = true
+				break
+			}
+		}
+		if !hasScanColumn {
+			for _, column := range ds.TableInfo.Columns {
+				if column.ID == columnID {
+					physicalColumns = append(physicalColumns, column)
+					break
+				}
+			}
+		}
+
+		hasSchemaColumn := false
+		for _, column := range physicalSchema.Columns {
+			if column.ID == columnID {
+				hasSchemaColumn = true
+				break
+			}
+		}
+		if !hasSchemaColumn {
+			if column, ok := ds.TblColsByID[columnID]; ok {
+				physicalSchema.Append(column)
+			}
+		}
+	}
+	return physicalColumns, physicalSchema
+}
+
 // GetPhysicalScan4LogicalTableScan returns PhysicalTableScan for the LogicalTableScan.
 func GetPhysicalScan4LogicalTableScan(s *logicalop.LogicalTableScan, schema *expression.Schema, stats *property.StatsInfo) *PhysicalTableScan {
 	ds := s.Source
+	physicalColumns, physicalSchema := ensureFTSColumnsForPhysicalScan(ds, ds.Columns, schema)
 	ts := PhysicalTableScan{
 		Table:           ds.TableInfo,
-		Columns:         ds.Columns,
+		Columns:         physicalColumns,
 		TableAsName:     ds.TableAsName,
 		DBName:          ds.DBName,
 		isPartition:     ds.PartitionDefIdx != nil,
@@ -2961,7 +3039,7 @@ func GetPhysicalScan4LogicalTableScan(s *logicalop.LogicalTableScan, schema *exp
 		tblColHists:     ds.TblColHists,
 	}.Init(s.SCtx(), s.QueryBlockOffset())
 	ts.SetStats(stats)
-	ts.SetSchema(schema.Clone())
+	ts.SetSchema(physicalSchema)
 	if ds.FtsPushDown != nil {
 		ts.FtsQueryInfo = ds.FtsPushDown.QueryInfo
 	}
@@ -3427,9 +3505,10 @@ func (ts *PhysicalTableScan) getScanRowSize() float64 {
 }
 
 func getOriginalPhysicalTableScan(ds *logicalop.DataSource, prop *property.PhysicalProperty, path *util.AccessPath, isMatchProp bool) (*PhysicalTableScan, float64) {
+	physicalColumns, physicalSchema := ensureFTSColumnsForPhysicalScan(ds, ds.Columns, ds.Schema())
 	ts := PhysicalTableScan{
 		Table:           ds.TableInfo,
-		Columns:         slices.Clone(ds.Columns),
+		Columns:         physicalColumns,
 		TableAsName:     ds.TableAsName,
 		DBName:          ds.DBName,
 		isPartition:     ds.PartitionDefIdx != nil,
@@ -3444,7 +3523,7 @@ func getOriginalPhysicalTableScan(ds *logicalop.DataSource, prop *property.Physi
 		prop:            prop,
 		filterCondition: slices.Clone(path.TableFilters),
 	}.Init(ds.SCtx(), ds.QueryBlockOffset())
-	ts.SetSchema(ds.Schema().Clone())
+	ts.SetSchema(physicalSchema)
 	rowCount := path.CountAfterAccess
 	// Add an arbitrary tolerance factor to account for comparison with floating point
 	if (prop.ExpectedCnt + cost.ToleranceFactor) < ds.StatsInfo().RowCount {
