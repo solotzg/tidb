@@ -1,6 +1,6 @@
 # MATCH AGAINST release-8.5 交付状态与 ETA
 
-更新时间：2026-09-20  
+更新时间：2026-09-22
 本文档是当前唯一的交付状态基线。更早的设计和状态文档仅保留历史记录。
 
 ## 1. 结论
@@ -9,8 +9,8 @@
 
 | 范围 | 当前状态 | 交付判断 |
 | --- | --- | --- |
-| #70484/#70485：TiFlash Boolean MATCH 下推 | TiDB + tipb + TiFlash 链路已打通，本地 TiUP E2E 已通过 | 可交付研发测试环境，不建议直接作为正式版本发布 |
-| #70486：无 FULLTEXT 索引时 TiDB 本地执行 | analyzer、matcher 和 local builtin 已移植，但无索引 E2E 仍报找不到 FULLTEXT index | 尚未完成 |
+| #70484/#70485：TiFlash Boolean MATCH 下推 | TiDB + tipb + TiFlash 链路已打通，真实 TiUP native/fallback E2E 已通过 | 可交付研发测试环境；正式发布仍需完成 release 验收 |
+| #70486：无 FULLTEXT 索引时 TiDB 本地执行 | 不属于本次 #70484/#70485 交付范围 | 不纳入本次 release 验收 |
 
 当前不能称为完整 MySQL `MATCH ... AGAINST` 兼容实现，因为评分结果、自然语言排名和 query expansion 不在本次范围内。
 
@@ -20,24 +20,15 @@
 
 - 路径：`/Users/solotzg/Work/tidb-2`
 - 分支：`match_against-release-8.5`
-- HEAD：`b5224ea7e0`
-- 二进制：`v8.5.8-27-gb5224ea7e0`
-- 当前有 4 个未提交的 planner/protocol 修复：
-  - `pkg/planner/core/expression_rewriter.go`
-  - `pkg/planner/core/find_best_task.go`
-  - `pkg/planner/core/operator/logicalop/logical_datasource.go`
-  - `pkg/planner/core/plan_to_pb.go`
+- HEAD：`19ec517d96`
+- 本次 collation 修复已提交并推送到 `origin/match_against-release-8.5`。
 
 ### TiFlash
 
 - 路径：`/Users/solotzg/Work/tiflash`
 - 分支：`match_against`
-- HEAD：`bd4f78a06c`
-- 二进制：`v8.5.8-2-gbd4f78a06c`
-- 当前 tracked 修改：
-  - `dbms/src/TiDB/Schema/TiDB.cpp`：处理 tipb 传入的 signed collation ID；
-  - `libs/libcommon/include/common/demangle.h`：已有的 `<cstdlib>` 修复。
-- `.vscode/build-debug.sh` 的外部 proxy 配置修改被 `.gitignore` 忽略，属于本地构建脚本修改。
+- HEAD：`b6f1477fa1`
+- `origin/match_against` 与本地一致，工作区干净。
 
 ### tipb
 
@@ -60,12 +51,12 @@ AND constant search string
 
 已验证：
 
-- `+MySQL -tutorial` 返回 `2,3,4,5`；
-- `+PostgreSQL` 返回 `4`；
-- 无匹配词返回 `0`；
-- `COUNT(*)` 返回 `4`；
-- 执行计划包含 `mpp[tiflash]`；
-- TiFlash production path 已接入 Boolean AST、required/prohibited term、phrase、prefix 和 NULL 文档处理；其中 phrase、prefix、NULL 仍需纳入最终 runtime 差分验收，不能仅以源码测试代替。
+- `+tidb -mysql` 返回 `id=2`；
+- `+tidb` 在 `utf8mb4_general_ci` 下匹配 `id=1,2,4`；
+- NULL 文档和空查询不会误匹配；
+- 有 replica 时执行计划包含 `mpp[tiflash]`；
+- 撤销 replica 后执行计划切换为 TiDB root `Selection -> cop[tikv]`，结果仍为 `id=2`；
+- TiDB fallback 已按 MATCH 列 collation 处理大小写和重音。
 
 关键修复包括：
 
@@ -74,28 +65,21 @@ AND constant search string
 3. table-scan protocol 边界补齐被聚合算子裁剪掉的 FTS 列；
 4. TiFlash 支持 tipb signed collation ID。
 
-## 4. #70486 当前状态
+## 4. FULLTEXT 元数据边界
 
-#70486 的目标是：没有 FULLTEXT 索引时，在 TiDB classic kernel 中使用本地 analyzer 和 Boolean matcher 完成无评分过滤；它不需要 TiFlash、TiKV FTS 或 TiCI。
+本次 #70484/#70485 交付要求 MATCH 列被 public STANDARD_V1 FULLTEXT index
+覆盖。该索引在当前阶段是 TiDB planner 的元数据和 parser 配置来源；TiDB
+fallback 不读取或维护物理 FULLTEXT 倒排索引，而是扫描普通表数据并在 TiDB
+内执行 analyzer 和 Boolean matcher。
 
-已经存在：
-
-- `pkg/expression/fulltext` analyzer；
-- `pkg/expression/matchagainst` Boolean parser；
-- `FTSLocalEvalInfo` 和本地 `match_against` builtin；
-- `tidb_enable_local_match_against` 开关；
-- analyzer、query matcher 和 builtin 单元测试。
-
-当前阻塞点：
+因此，没有 FULLTEXT 索引元数据时返回：
 
 ```text
-无 FULLTEXT 索引 + tidb_enable_local_match_against=ON
-仍返回：Can't find FULLTEXT index matching the column list
+Can't find FULLTEXT index matching the column list
 ```
 
-原因是本地路径仍通过 `resolveLocalFullTextIndex` 获取 parser 配置，并把 FULLTEXT index 当作必需条件。无索引场景应该直接使用 `STANDARD_V1` 和 session analyzer 配置。
-
-因此，#70486 当前是“基础实现已移植、触发路径未完成”，不能标记为完成。
+属于预期行为，不是本次交付缺陷。无索引时直接执行 Boolean MATCH 属于
+#70486，当前不纳入 release-8.5 交付范围。
 
 ## 5. 明确不在本次交付范围
 
@@ -121,19 +105,17 @@ SELECT MATCH(title) AGAINST('MySQL') AS score FROM articles;
 
 | 阶段 | 工作内容 | 预计耗时 | 预计完成 |
 | --- | --- | ---: | --- |
-| P0 | 修复 #70486 无索引 parser 选择和 local planner 触发条件 | 0.5–1 个工作日 | 2026-09-21 |
-| P0 | 增加无索引 E2E：词边界、短词、短语、prefix、NULL、prepared query | 1 个工作日 | 2026-09-22 |
-| P0 | 完成 #70484/#70485 TiDB-TiFlash 差分回归和 TiFlash gtest runtime | 1–2 个工作日 | 2026-09-24 |
-| P1 | 完整构建、混合版本协议验证、schema/replica/restart 场景 | 1–2 个工作日 | 2026-09-26 |
-| P1 | 清理未提交变更、补文档、推送分支、形成 release-8.5 测试包 | 1 个工作日 | 2026-09-28 |
+| P0 | 完成 #70484/#70485 TiDB-TiFlash 差分回归和 TiFlash gtest runtime | 1–2 个工作日 | 待 CI/环境确认 |
+| P1 | 完整构建、混合版本协议验证、schema/replica/restart 场景 | 1–2 个工作日 | 待 CI/环境确认 |
+| P1 | 形成 release-8.5 测试包并完成 code review | 1 个工作日 | 待评审排期 |
 
 ### ETA 结论
 
-- **研发测试包**：约 2 个工作日，目标 2026-09-22；
-- **release-8.5 内部验收包**：约 3–4 个工作日，目标 2026-09-24～2026-09-25；
-- **具备正式发布条件的候选版本**：约 5–6 个工作日，目标 2026-09-28～2026-09-29。
+- **研发测试包**：核心 native/fallback E2E 已具备；
+- **release-8.5 内部验收包**：取决于 clean build、gtest、差分回归和 code review；
+- **正式发布候选版本**：不能仅由当前手工 E2E 单独确认。
 
-如果只交付 #70484/#70485 的 TiFlash Boolean 下推，可以跳过 #70486，内部验收 ETA 可缩短到 2–3 个工作日；如果要求完整 MySQL 评分和自然语言模式，则不属于当前 ETA，需要另立项目。
+当前只交付 #70484/#70485 的 TiFlash Boolean 下推；#70486、完整 MySQL 评分和自然语言模式均需要另立范围。
 
 ## 7. 交付验收标准
 
@@ -144,25 +126,23 @@ SELECT MATCH(title) AGAINST('MySQL') AS score FROM articles;
 - TiFlash gtest runtime 通过；
 - 真实 TiUP Playground E2E 通过；
 - required、optional、prohibited、phrase、prefix、NULL 和聚合场景通过；
-- 无索引、非默认 parser、非默认 analyzer 不会错误 native 下推；
+- public FULLTEXT 元数据缺失时保持预期错误；
+- 非默认 parser、非默认 analyzer 不会错误 native 下推；
 - 工作树清理并形成可审查 commit/PR。
 
 ### #70486
 
-- 无 FULLTEXT 索引表在开关开启时可执行 Boolean MATCH；
-- 词边界与 token size 行为通过差分测试；
-- phrase、prefix、required/prohibited、NULL 和 prepared query 通过；
-- 无索引路径只在 TiDB 本地执行，不发送到 TiFlash native FTS；
-- 开关关闭时保持明确、兼容的错误或既有 fallback 行为；
-- 文档明确 no-score 限制。
+本次 release-8.5 交付不验收 #70486。无 FULLTEXT 索引时直接执行 Boolean
+MATCH 的行为保持为后续独立工作项。
 
 ## 8. 当前交付建议
 
 当前版本建议标记为：
 
-> #70484/#70485：核心链路完成，测试环境可交付；  
-> #70486：基础代码完成，无索引触发路径待修复；  
-> 整体：暂不作为 release-8.5 正式生产版本发布。
+> #70484/#70485：TiDB、tipb、TiFlash native/fallback 核心链路完成，真实
+> TiUP 测试环境已验证；
+> #70486：不属于本次 release-8.5 交付范围；
+> 整体：正式发布仍需完成 clean build、gtest、差分回归和 code review。
 
 历史文档：
 
