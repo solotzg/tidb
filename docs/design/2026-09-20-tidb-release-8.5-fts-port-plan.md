@@ -1,8 +1,6 @@
 # TiDB release-8.5 MATCH AGAINST FTS 移植计划与结果
 
-> 历史移植计划。当前交付状态、#70486 缺口和 ETA 以
-> [2026-09-20 交付状态与 ETA](./2026-09-20-match-against-release-8.5-delivery-status.md)
-> 为准。
+> 历史移植计划。当前交付状态以代码、测试结果及对应 PR 为准。
 
 更新时间：2026-09-20
 

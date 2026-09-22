@@ -1,8 +1,6 @@
 # MATCH ... AGAINST Boolean pushdown to TiFlash
 
-> 历史设计文档。当前状态、验收结论和 ETA 以
-> [2026-09-20 交付状态与 ETA](./2026-09-20-match-against-release-8.5-delivery-status.md)
-> 为准。
+> 历史设计文档。当前状态和验收结论以代码、测试结果及对应 PR 为准。
 
 This is a living implementation plan. It records the limited TiDB-side work
 for the #70484/#70485 feature scope and must be updated as milestones finish.
