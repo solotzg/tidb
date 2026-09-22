@@ -23,6 +23,7 @@ import (
 	"github.com/pingcap/tidb/pkg/parser/mysql"
 	"github.com/pingcap/tidb/pkg/types"
 	"github.com/pingcap/tidb/pkg/util/chunk"
+	"github.com/pingcap/tidb/pkg/util/collate"
 	"github.com/pingcap/tidb/pkg/util/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +102,41 @@ func TestFTSMysqlMatchAgainstLocalEvalPrefix(t *testing.T) {
 	v, _, err = sf.EvalReal(ctx, stringRow("metadata only"))
 	require.NoError(t, err)
 	require.Equal(t, float64(0), v)
+}
+
+func TestFTSMysqlMatchAgainstLocalEvalCollation(t *testing.T) {
+	previous := collate.NewCollationEnabled()
+	collate.SetNewCollationEnabledForTest(true)
+	defer collate.SetNewCollationEnabledForTest(previous)
+
+	ctx := mock.NewContext()
+	newWithCollation := func(columnCollation string) *ScalarFunction {
+		stringTp := types.NewFieldType(mysql.TypeVarchar)
+		stringTp.SetCollate(columnCollation)
+		search := &Constant{Value: types.NewStringDatum("+quick"), RetType: stringTp}
+		column := &Column{Index: 0, RetType: stringTp}
+		fn, err := NewFunction(ctx, ast.FTSMysqlMatchAgainst, types.NewFieldType(mysql.TypeDouble), search, column)
+		require.NoError(t, err)
+		sf := fn.(*ScalarFunction)
+		require.NoError(t, SetFTSMysqlMatchAgainstModifier(sf, ast.FulltextSearchModifierBooleanMode))
+		info := localEvalInfoForTest()
+		info.AnalyzerConfig.Collation = columnCollation
+		require.NoError(t, SetFTSMysqlMatchAgainstLocalEvalInfo(sf, info))
+		return sf
+	}
+
+	bin := newWithCollation("utf8mb4_bin")
+	v, _, err := bin.EvalReal(ctx, stringRow("QUICK runner"))
+	require.NoError(t, err)
+	require.Equal(t, float64(0), v)
+	v, _, err = bin.EvalReal(ctx, stringRow("quick runner"))
+	require.NoError(t, err)
+	require.Equal(t, float64(1), v)
+
+	ci := newWithCollation("utf8mb4_general_ci")
+	v, _, err = ci.EvalReal(ctx, stringRow("QUICK runner"))
+	require.NoError(t, err)
+	require.Equal(t, float64(1), v)
 }
 
 // TestFTSMysqlMatchAgainstLocalEvalMultiColumn checks that a token found in any
