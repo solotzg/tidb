@@ -17,6 +17,7 @@ package fulltext
 import (
 	"testing"
 
+	"github.com/pingcap/tidb/pkg/expression/matchagainst"
 	"github.com/pingcap/tidb/pkg/meta/model"
 	"github.com/pingcap/tipb/go-tipb"
 	"github.com/stretchr/testify/require"
@@ -162,6 +163,36 @@ func TestBuildLocalMatchAgainstBooleanQueryRejectsSplitStandardPrefix(t *testing
 	}
 	_, err := BuildLocalMatchAgainstBooleanQueryWithNgramTokenSize("+foo.bar*", model.FullTextParserTypeNgramV1, 2)
 	require.NoError(t, err, "NGRAM uses a different prefix normalization")
+}
+
+func TestLocalMatchAgainstCapabilityErrorPrecedence(t *testing.T) {
+	config := AnalyzerConfig{ParserType: model.FullTextParserTypeStandardV1, InnodbFtMinTokenSize: 3, InnodbFtMaxTokenSize: 84}
+	for _, tc := range []struct {
+		name, search, want string
+		nested             bool
+	}{
+		{"nested_after_split_prefix", "+foo.bar*", "nested BOOLEAN MODE groups", true},
+		{"nested_after_score_modifier", "cat", "nested BOOLEAN MODE groups", true},
+		{"split_prefix_after_score_modifier", "cat +foo.bar*", "split STANDARD prefix", false},
+		{"score_modifier_only", "cat", "unsupported BOOLEAN MODE score modifier", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group, err := ParseBooleanQuery(tc.search, config.ParserType)
+			require.NoError(t, err)
+			// Inject unsupported nodes directly: SQL parsing itself can reject
+			// extensions before the wire serializer's capability checks run.
+			if len(group.Should) != 0 {
+				group.Should[0].Modifier = matchagainst.BooleanModifierBoost
+			}
+			if tc.nested {
+				group.MustNot = append(group.MustNot, matchagainst.BooleanClause{Expr: &matchagainst.BooleanGroup{}})
+			}
+			_, err = BuildParsedLocalMatchAgainstBooleanQuery(group, config)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+	_, err := BuildParsedLocalMatchAgainstBooleanQuery(nil, config)
+	require.EqualError(t, err, "nil Local MATCH Boolean group")
 }
 
 func TestAnalyzerConfigFromLocalMatchAgainstBooleanQuery(t *testing.T) {

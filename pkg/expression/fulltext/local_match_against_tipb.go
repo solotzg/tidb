@@ -54,25 +54,38 @@ func buildParsedLocalMatchAgainstBooleanQuery(group *matchagainst.BooleanGroup, 
 	if group == nil {
 		return nil, fmt.Errorf("nil Local MATCH Boolean group")
 	}
-	if containsLocalMatchAgainstBooleanSubExpression(group) {
-		return nil, fmt.Errorf("nested BOOLEAN MODE groups are not supported by TiFlash Local MATCH pushdown")
-	}
-	if parserType == model.FullTextParserTypeStandardV1 {
-		for _, clauses := range [][]matchagainst.BooleanClause{group.Must, group.Should, group.MustNot} {
-			for _, clause := range clauses {
-				if term, ok := clause.Expr.(*matchagainst.BooleanTerm); ok && term.Wildcard && len(PreserveUnderscoreTokenize(term.Text())) > 1 {
-					// TiDB treats the earlier tokens as exact terms and only the
-					// last token as a prefix. TiFlash currently expects one token.
-					return nil, fmt.Errorf("split STANDARD prefix terms require TiDB Local MATCH evaluation")
+	clausesByOccur := [...][]matchagainst.BooleanClause{group.Must, group.Should, group.MustNot}
+	// Preserve capability-error precedence: any nested group wins over a
+	// split STANDARD prefix, and both win over node-conversion errors. Record
+	// split prefixes while checking groups instead of scanning the AST again.
+	hasSplitPrefix := false
+	for _, clauses := range clausesByOccur {
+		for _, clause := range clauses {
+			switch expr := clause.Expr.(type) {
+			case *matchagainst.BooleanGroup:
+				return nil, fmt.Errorf("nested BOOLEAN MODE groups are not supported by TiFlash Local MATCH pushdown")
+			case *matchagainst.BooleanTerm:
+				if !hasSplitPrefix && parserType == model.FullTextParserTypeStandardV1 && expr.Wildcard {
+					hasSplitPrefix = len(PreserveUnderscoreTokenize(expr.Text())) > 1
 				}
 			}
 		}
 	}
-	query, err := buildLocalMatchAgainstBooleanGroup(group)
-	if err != nil {
-		return nil, err
+	if hasSplitPrefix {
+		// TiDB treats earlier tokens as exact terms and only the last as a
+		// prefix. TiFlash currently expects a single STANDARD prefix token.
+		return nil, fmt.Errorf("split STANDARD prefix terms require TiDB Local MATCH evaluation")
 	}
-	query.Version = LocalMatchAgainstProtocolVersion
+	query := &tipb.LocalMatchAgainstBooleanQuery{Version: LocalMatchAgainstProtocolVersion}
+	for _, clauses := range clausesByOccur {
+		for _, clause := range clauses {
+			node, err := buildLocalMatchAgainstBooleanNode(clause)
+			if err != nil {
+				return nil, err
+			}
+			query.Nodes = append(query.Nodes, node)
+		}
+	}
 	switch parserType {
 	case model.FullTextParserTypeStandardV1:
 		query.Parser = tipb.LocalMatchAgainstParser_LocalMatchAgainstParserStandard
@@ -160,37 +173,6 @@ func BuildParsedLocalMatchAgainstBooleanQuery(group *matchagainst.BooleanGroup, 
 		}
 		query.InnodbFtMinTokenSize = uint32(config.InnodbFtMinTokenSize)
 		query.InnodbFtMaxTokenSize = uint32(config.InnodbFtMaxTokenSize)
-	}
-	return query, nil
-}
-
-func containsLocalMatchAgainstBooleanSubExpression(group *matchagainst.BooleanGroup) bool {
-	if group == nil {
-		return false
-	}
-	for _, clauses := range [][]matchagainst.BooleanClause{group.Must, group.Should, group.MustNot} {
-		for _, clause := range clauses {
-			if _, ok := clause.Expr.(*matchagainst.BooleanGroup); ok {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func buildLocalMatchAgainstBooleanGroup(group *matchagainst.BooleanGroup) (*tipb.LocalMatchAgainstBooleanQuery, error) {
-	if group == nil {
-		return nil, fmt.Errorf("nil Local MATCH Boolean group")
-	}
-	query := &tipb.LocalMatchAgainstBooleanQuery{}
-	for _, clauses := range [][]matchagainst.BooleanClause{group.Must, group.Should, group.MustNot} {
-		for _, clause := range clauses {
-			node, err := buildLocalMatchAgainstBooleanNode(clause)
-			if err != nil {
-				return nil, err
-			}
-			query.Nodes = append(query.Nodes, node)
-		}
 	}
 	return query, nil
 }

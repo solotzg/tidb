@@ -32,6 +32,7 @@ go_test(
     flaky = False,
     shard_count = 18,
     deps = [
+        "//pkg/expression/matchagainst",
         "//pkg/meta/model",
         "//pkg/sessionctx/variable",
         "//pkg/util/collate",
